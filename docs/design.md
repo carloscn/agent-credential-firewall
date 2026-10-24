@@ -17,7 +17,7 @@ ACF sits between agents and credential-backed services. It authenticates the cal
 The initial deployment model assumes:
 
 - Agents run on developer endpoints, trusted servers, VPS instances, and remote terminals.
-- Devices communicate over a Tailscale tailnet.
+- Devices communicate with gateways over a mutually authenticated, encrypted transport.
 - Secrets are stored in Bitwarden Secrets Manager.
 - Bitwarden Secrets Manager SDK is used by gateways to retrieve secrets.
 - The gateway is deployed on dedicated, hardened infrastructure separate from agent workloads.
@@ -45,7 +45,7 @@ ACF should:
 2. Prefer proxying authorized actions over returning secret values.
 3. Bind authorization to user, device, workload, agent, task, resource, action, and time.
 4. Support developer endpoints, unattended VPS workloads, and remote terminals.
-5. Use Tailscale identity and application capabilities where available.
+5. Support pluggable connection identity, device identity, and posture providers.
 6. Enforce least privilege across development and production environments.
 7. Produce useful audit records without recording secret values.
 8. Support rapid session revocation and device isolation.
@@ -57,13 +57,13 @@ ACF should:
 The first version will not:
 
 - Replace Bitwarden Secrets Manager.
-- Replace Tailscale access control.
+- Replace an organization's identity provider or network access control system.
 - Guarantee safety after a gateway host is fully compromised.
 - Turn static third-party bearer tokens into cryptographically non-exportable credentials.
 - Provide a general-purpose remote shell.
 - Permit arbitrary secret retrieval from untrusted remote terminals.
 - Automatically rotate every downstream credential type.
-- Treat tailnet membership alone as sufficient authorization.
+- Treat network membership or reachability alone as sufficient authorization.
 
 ## 5. Threat model
 
@@ -81,15 +81,15 @@ The first version will not:
 - A compromised developer endpoint.
 - A compromised VPS or CI worker.
 - A malicious or vulnerable agent tool or plugin.
-- A tailnet node with valid connectivity but excessive permissions.
+- An authenticated node with valid connectivity but excessive permissions.
 - An attacker with access to logs, traces, crash dumps, or backups.
 - A malicious insider attempting to use legitimate infrastructure outside an approved task.
 
 ### 5.3 Trust assumptions
 
-- Bitwarden and Tailscale behave according to their documented security models.
+- Bitwarden and configured identity providers behave according to their documented security models.
 - Gateway hosts are more trusted and more tightly controlled than agent hosts.
-- Tailscale provides authenticated network identity, but not proof that an endpoint is uncompromised.
+- Connection and device identity do not prove that an endpoint is uncompromised.
 - Downstream APIs correctly enforce the credentials and requests presented to them.
 - Host-level root compromise can expose credentials currently in gateway memory.
 
@@ -99,8 +99,8 @@ The first version will not:
 flowchart LR
     U[User] --> A[AI Agent]
     A --> D[Local Agent Daemon]
-    D -->|Tailscale| G[Credential Gateway]
-    G --> I[Tailscale Identity / WhoIs]
+    D -->|Authenticated encrypted transport| G[Credential Gateway]
+    G --> I[Identity and Posture Provider]
     G --> P[Policy Engine]
     G --> B[Bitwarden Provider]
     B --> BW[Bitwarden Secrets Manager]
@@ -121,7 +121,7 @@ User content / repositories
 AI agent process
         ↓
 Local agent daemon
-        ↓  authenticated tailnet connection
+        ↓  authenticated encrypted connection
 Credential gateway
         ↓
 Bitwarden and approved downstream services
@@ -137,7 +137,7 @@ The daemon provides a small local API to the agent and attaches trusted local co
 
 Responsibilities:
 
-- Establish a mutually authenticated connection to the gateway over Tailscale.
+- Establish a mutually authenticated, encrypted connection to the gateway.
 - Identify the local agent runtime and current task.
 - Prevent agents from forging device or process metadata.
 - Keep short-lived task capabilities in protected local storage or memory.
@@ -152,7 +152,7 @@ The gateway is the main enforcement point.
 
 Responsibilities:
 
-- Resolve the caller's Tailscale identity and application capabilities.
+- Resolve trusted caller, device, and workload identity from configured providers.
 - Validate task capabilities and request freshness.
 - Evaluate authorization policy.
 - Retrieve secrets through the configured provider.
@@ -163,12 +163,27 @@ Responsibilities:
 
 The gateway must never expose a general-purpose `get any secret` endpoint to agents.
 
-### 7.3 Policy Engine
+### 7.3 Identity Context Provider
+
+The gateway should obtain identity and posture data through a provider interface rather than depend on a specific network or identity vendor:
+
+```go
+type IdentityContextProvider interface {
+    Resolve(ctx context.Context, connection ConnectionInfo) (IdentityContext, error)
+    Verify(ctx context.Context, identity IdentityContext) error
+}
+```
+
+Provider output must be derived from authenticated connection state or signed assertions. Identity headers supplied directly by an agent are untrusted unless a trusted intermediary removes and replaces them.
+
+Possible implementations include mutual TLS, workload identity, signed device certificates, private-network identity, or an organization's existing identity-aware proxy.
+
+### 7.4 Policy Engine
 
 Authorization decisions should consider:
 
-- Tailnet user identity.
-- Device identity and tags.
+- User or workload identity.
+- Device identity and labels.
 - Device posture, when available.
 - Agent identity and version.
 - Task identifier and task issuer.
@@ -185,7 +200,7 @@ Example decision input:
   "subject": {
     "user": "alice@example.com",
     "device": "vps-agent-17",
-    "tags": ["tag:agent-prod"],
+    "labels": ["agent", "production"],
     "agent": "acf-agent-123"
   },
   "task": {
@@ -200,7 +215,7 @@ Example decision input:
 }
 ```
 
-### 7.4 Secret Provider Interface
+### 7.5 Secret Provider Interface
 
 The gateway should isolate secret-manager-specific behavior behind an interface:
 
@@ -215,7 +230,7 @@ The initial implementation uses Bitwarden Secrets Manager SDK. Future providers 
 
 Secret values must be represented by types that discourage logging, serialization, and accidental string formatting.
 
-### 7.5 Action Connectors
+### 7.6 Action Connectors
 
 Action connectors use credentials without revealing them to the agent. Initial connectors may include:
 
@@ -230,30 +245,29 @@ Connectors must parse and validate requests instead of accepting arbitrary comma
 
 ACF uses layered authorization:
 
-1. **Network layer** — Tailscale grants control which nodes can reach a gateway.
-2. **Connection identity** — the gateway resolves the actual tailnet user/device identity.
-3. **Application capability** — Tailscale application capabilities describe broad permitted operations.
+1. **Network layer** — private routing and firewall rules control which nodes can reach a gateway.
+2. **Connection identity** — the gateway authenticates the calling user, device, or workload through a configured identity mechanism.
+3. **Device and workload assertions** — signed claims provide labels, posture, environment, and other trusted context.
 4. **Task capability** — the orchestrator grants a short-lived set of actions and resources to one task.
 5. **Gateway policy** — contextual policy produces the final allow or deny decision.
 6. **Connector enforcement** — the connector validates the exact downstream request.
 
 No single layer is sufficient by itself.
 
-### 8.1 Example Tailscale capability
+### 8.1 Example trusted identity context
 
 ```json
 {
-  "src": ["tag:agent-prod"],
-  "dst": ["tag:credential-gateway-prod"],
-  "ip": ["tcp:8443"],
-  "app": {
-    "agentcredentialfirewall.dev/cap/actions": [
-      {
-        "actions": ["github.create_pull_request"],
-        "resources": ["repo:example/backend"]
-      }
-    ]
-  }
+  "principal": "workload:agent-prod-17",
+  "deviceId": "device-01JB...",
+  "labels": ["agent", "production", "eu"],
+  "posture": {
+    "managed": true,
+    "diskEncrypted": true,
+    "lastVerifiedAt": "2026-10-24T15:00:00Z"
+  },
+  "issuer": "identity-provider",
+  "expiresAt": "2026-10-24T15:15:00Z"
 }
 ```
 
@@ -306,15 +320,15 @@ sequenceDiagram
     participant A as Agent
     participant D as Local Daemon
     participant G as Gateway
-    participant T as Tailscale Identity
+    participant I as Identity Provider
     participant P as Policy Engine
     participant B as Bitwarden
     participant X as Downstream API
 
     A->>D: Request logical action
     D->>G: Action + task capability
-    G->>T: Resolve caller identity/capabilities
-    T-->>G: User, device, tags, capabilities
+    G->>I: Resolve and verify caller identity
+    I-->>G: User/workload, device, labels, posture
     G->>P: Evaluate full context
     P-->>G: Allow with constraints
     G->>B: Retrieve referenced secret
@@ -332,13 +346,13 @@ Requests must include a nonce or request identifier. The gateway should reject e
 ### 11.1 Recommended topology
 
 ```text
-Tailnet
-├── gateway-dev-01        tag:credential-gateway-dev
-├── gateway-prod-eu-01    tag:credential-gateway-prod-eu
-├── gateway-prod-eu-02    tag:credential-gateway-prod-eu
-├── laptop-agents         user identities / tag:agent-dev
-├── vps-agent-dev         tag:agent-dev
-└── vps-agent-prod        tag:agent-prod
+Private network / authenticated service fabric
+├── gateway-dev-01        role=gateway, env=dev
+├── gateway-prod-eu-01    role=gateway, env=prod, region=eu
+├── gateway-prod-eu-02    role=gateway, env=prod, region=eu
+├── laptop-agents         user and device identities
+├── vps-agent-dev         role=agent, env=dev
+└── vps-agent-prod        role=agent, env=prod
 ```
 
 Gateways should:
@@ -346,7 +360,7 @@ Gateways should:
 - Run on dedicated, hardened hosts.
 - Be separate from hosts executing agents or user-provided code.
 - Have no public inbound listener.
-- Listen only on the Tailscale interface or use an embedded tailnet endpoint.
+- Listen only on a private interface or authenticated service endpoint.
 - Permit outbound access only to Bitwarden, audit infrastructure, and approved downstream services.
 - Use separate Bitwarden machine accounts or access tokens per gateway instance and environment.
 - Keep secret values in memory for the shortest practical duration.
@@ -390,7 +404,7 @@ acf-prod-eu-02       → project: agent-prod-eu
 
 Gateway access tokens are bootstrap credentials and must be protected separately from agent workloads. Preferred storage options include TPM- or KMS-protected service credentials and operating-system credential facilities. They must not be committed to source control, built into images, or passed in process arguments.
 
-Because an authenticated Bitwarden session may remain usable for a period after access-token revocation, gateway session termination and tailnet isolation must be separate incident-response controls.
+Because an authenticated Bitwarden session may remain usable for a period after access-token revocation, gateway session termination and network isolation must be separate incident-response controls.
 
 ## 13. Audit and detection
 
@@ -418,8 +432,8 @@ Useful detections include unusual request volume, new resource access, off-hours
 
 ACF should fail closed when:
 
-- Tailscale identity cannot be resolved.
-- Application capabilities cannot be verified.
+- Connection identity cannot be resolved or verified.
+- Required device or workload assertions cannot be verified.
 - The task capability is absent, invalid, expired, or revoked.
 - Policy is unavailable or ambiguous.
 - The destination does not match the connector allowlist.
@@ -432,7 +446,7 @@ Short, bounded caching may be supported for availability, but offline access to 
 
 When a device or gateway is suspected of compromise:
 
-1. Remove or quarantine the device in Tailscale.
+1. Remove or quarantine the device through the configured network and identity controls.
 2. Revoke active ACF task capabilities and sessions.
 3. Stop the affected gateway instance when applicable.
 4. Revoke its Bitwarden access token.
@@ -479,8 +493,8 @@ Example action request:
 
 ### Phase 1 — foundation
 
-- Gateway service reachable only over Tailscale.
-- Tailscale caller identity resolution.
+- Gateway service reachable only through a private, authenticated interface.
+- Pluggable caller and device identity resolution.
 - Bitwarden Secrets Manager provider.
 - Static policy configuration with deny-by-default behavior.
 - Generic HTTP bearer-token connector with strict allowlists.
@@ -512,7 +526,7 @@ Example action request:
 - How should connectors filter potentially sensitive downstream responses?
 - Which secret types can be replaced by genuinely short-lived credentials?
 - How should gateway bootstrap credentials be provisioned in self-hosted deployments?
-- What is the acceptable behavior during Bitwarden or Tailscale outages?
+- What is the acceptable behavior during Bitwarden or identity-provider outages?
 - Should tenants receive dedicated gateway instances or isolated logical partitions?
 
 ## 19. Security principles
