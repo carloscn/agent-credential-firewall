@@ -9,12 +9,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use acf_audit::{AuditError, AuditEvent, AuditHasher, AuditSink, GatewayInfo, MemorySink, Verdict};
 use acf_config::load_yaml;
 use acf_connectors::{
     ActionConnector, ConnectorCall, ConnectorError, ConnectorOutput, HttpConnector, HttpLimits,
     NetworkPolicy, SystemResolver,
 };
-use acf_gateway::{Gateway, GatewayError, ProviderRegistry, ServerLimits, router};
+use acf_gateway::{AuditSettings, Gateway, GatewayError, ProviderRegistry, ServerLimits, router};
 use acf_identity::{ConnectionInfo, DevelopmentIdentityProvider};
 use acf_policy::{Authorizer, AuthorizerSettings};
 use acf_protocol::{
@@ -155,7 +156,10 @@ profiles:
         classification: read
         params:
           view: { location: query, type: string, enum: [summary, full] }
+          note: { location: query, type: string }
+          token: { location: query, type: string }
         response: { fields: [user, authenticated] }
+        audit: { record: [view], hash: [note] }
       example.records.create:
         method: POST
         path: /records
@@ -193,9 +197,32 @@ struct Harness {
     gateway: Arc<Gateway>,
     events: Events,
     upstream: UpstreamLog,
+    audit: Arc<MemorySink>,
+}
+
+fn audit_settings(sink: Arc<dyn AuditSink>) -> AuditSettings {
+    AuditSettings {
+        sink,
+        hasher: AuditHasher::random().unwrap(),
+        required: true,
+        gateway: GatewayInfo {
+            id: "gw-test".to_owned(),
+            build: "development".to_owned(),
+            deployment_profile: "development".to_owned(),
+        },
+    }
 }
 
 async fn harness(principal: &str, delay: Duration, seed: bool) -> Harness {
+    harness_with(principal, delay, seed, None).await
+}
+
+async fn harness_with(
+    principal: &str,
+    delay: Duration,
+    seed: bool,
+    sink: Option<Arc<dyn AuditSink>>,
+) -> Harness {
     let (port, upstream) = start_upstream(delay).await;
     let origin = format!("http://127.0.0.1:{port}");
     let config = load_yaml(&BUNDLE.replace("{ORIGIN}", &origin)).unwrap();
@@ -241,11 +268,21 @@ async fn harness(principal: &str, delay: Duration, seed: bool) -> Harness {
         None,
     ));
     let registry = ProviderRegistry::default().with("development", provider);
-    let gateway = Gateway::new(authorizer, identity, registry, connector).unwrap();
+    let audit = Arc::new(MemorySink::default());
+    let sink = sink.unwrap_or_else(|| audit.clone());
+    let gateway = Gateway::new(
+        authorizer,
+        identity,
+        registry,
+        connector,
+        audit_settings(sink),
+    )
+    .unwrap();
     Harness {
         gateway: Arc::new(gateway),
         events,
         upstream,
+        audit,
     }
 }
 
@@ -462,6 +499,7 @@ async fn unreachable_upstream_is_a_failure_not_a_denial() {
             )
             .unwrap(),
         ),
+        audit_settings(Arc::new(MemorySink::default())),
     )
     .unwrap();
     let response = gateway
@@ -588,6 +626,7 @@ async fn startup_rejects_unsafe_wiring() {
         identity.clone(),
         ProviderRegistry::default(),
         connector.clone(),
+        audit_settings(Arc::new(MemorySink::default())),
     );
     assert_eq!(
         result.err(),
@@ -602,6 +641,172 @@ async fn startup_rejects_unsafe_wiring() {
         identity,
         ProviderRegistry::default(),
         connector,
+        audit_settings(Arc::new(MemorySink::default())),
     );
     assert_eq!(result.err(), Some(GatewayError::IdentityProviderRejected));
+}
+
+// ---------------------------------------------------------------------------
+// Audit
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn allowed_requests_emit_attributable_decision_and_outcome_events() {
+    let h = harness("dev-agent", Duration::ZERO, true).await;
+    h.gateway
+        .execute(&ConnectionInfo::default(), profile_get())
+        .await;
+
+    let events = h.audit.events();
+    let [decision, outcome] = events.as_slice() else {
+        panic!("{events:#?}")
+    };
+    for event in [decision, outcome] {
+        assert_eq!(event.request_id.as_str(), "req-1");
+        assert_eq!(event.task_id.as_str(), "dev-task");
+        assert_eq!(
+            event.principal.as_ref().map(PrincipalId::as_str),
+            Some("dev-agent")
+        );
+        assert_eq!(event.gateway.id, "gw-test");
+        assert_eq!(event.connector.as_deref(), Some("example-api"));
+        assert_eq!(
+            event.secret_ref.as_deref(),
+            Some("secret://development/example-api/read")
+        );
+    }
+    assert_eq!(decision.verdict, Verdict::Allowed);
+    assert_eq!(decision.policy.as_ref().unwrap().version, "dev.1");
+    assert_eq!(decision.policy.as_ref().unwrap().rules, ["dev-agent"]);
+    assert_eq!(outcome.verdict, Verdict::Completed);
+    assert_eq!(outcome.downstream.unwrap().status, Some(200));
+}
+
+#[tokio::test]
+async fn denied_requests_emit_attributable_reason_codes() {
+    for (principal, request, reason) in [
+        ("someone-else", profile_get(), "policy_no_matching_rule"),
+        (
+            "dev-agent",
+            request(
+                "example.profile.delete",
+                "example-api:development",
+                &json!({}),
+            ),
+            "unknown_action",
+        ),
+        (
+            "dev-agent",
+            request(
+                "example.profile.get",
+                "example-api:development",
+                &json!({ "url": "x" }),
+            ),
+            "invalid_parameters",
+        ),
+        (
+            "dev-agent",
+            request(
+                "example.records.create",
+                "example-api:development",
+                &json!({ "name": "n" }),
+            ),
+            "approval_unavailable",
+        ),
+    ] {
+        let h = harness(principal, Duration::ZERO, true).await;
+        h.gateway.execute(&ConnectionInfo::default(), request).await;
+        let events = h.audit.events();
+        let [decision] = events.as_slice() else {
+            panic!("{events:#?}")
+        };
+        assert_eq!(decision.verdict, Verdict::Denied);
+        assert_eq!(decision.reason.as_deref(), Some(reason));
+        assert_eq!(
+            decision.principal.as_ref().map(PrincipalId::as_str),
+            Some(principal)
+        );
+        assert!(decision.secret_ref.is_none() && decision.params.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn parameters_appear_only_as_classified() {
+    let h = harness("dev-agent", Duration::ZERO, true).await;
+    let call = request(
+        "example.profile.get",
+        "example-api:development",
+        &json!({ "view": "full", "note": "ticket-4711", "token": CANARY }),
+    );
+    h.gateway.execute(&ConnectionInfo::default(), call).await;
+
+    for event in h.audit.events() {
+        let text = serde_json::to_string(&event).unwrap();
+        assert!(!text.contains(CANARY), "omitted parameter leaked: {text}");
+        assert!(
+            !text.contains("ticket-4711"),
+            "hashed parameter leaked: {text}"
+        );
+        let params = serde_json::to_value(&event.params).unwrap();
+        assert_eq!(params["view"], json!({ "value": "full" }));
+        let hmac = params["note"]["hmac"].as_str().unwrap();
+        assert_eq!(hmac.len(), 64);
+        assert!(params.get("token").is_none());
+    }
+}
+
+struct FailingSink;
+
+#[async_trait]
+impl AuditSink for FailingSink {
+    async fn emit(&self, _: &AuditEvent) -> Result<(), AuditError> {
+        Err(AuditError::Unavailable)
+    }
+}
+
+#[tokio::test]
+async fn required_audit_fails_closed_before_the_credential_is_touched() {
+    let h = harness_with(
+        "dev-agent",
+        Duration::ZERO,
+        true,
+        Some(Arc::new(FailingSink)),
+    )
+    .await;
+    let response = h
+        .gateway
+        .execute(&ConnectionInfo::default(), profile_get())
+        .await;
+    assert!(
+        matches!(
+            response,
+            ActionResponse::Failed {
+                reason: FailureReason::AuditUnavailable,
+                ..
+            }
+        ),
+        "{response:?}"
+    );
+    assert!(
+        h.events.lock().unwrap().is_empty(),
+        "provider or connector ran"
+    );
+    assert!(h.upstream.requests.lock().unwrap().is_empty());
+
+    // Denials are still returned when the sink is down.
+    let h = harness_with(
+        "someone-else",
+        Duration::ZERO,
+        true,
+        Some(Arc::new(FailingSink)),
+    )
+    .await;
+    let response = h
+        .gateway
+        .execute(&ConnectionInfo::default(), profile_get())
+        .await;
+    assert!(
+        matches!(response, ActionResponse::Denied { .. }),
+        "{response:?}"
+    );
 }

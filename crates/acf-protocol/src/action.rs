@@ -121,6 +121,8 @@ pub enum FailureReason {
     CredentialReflected,
     /// The gateway did not finish within its time limit.
     GatewayTimeout,
+    /// A required audit event could not be recorded, so the action did not run.
+    AuditUnavailable,
 }
 
 /// Machine-readable denial reasons.

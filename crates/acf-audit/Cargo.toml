@@ -8,7 +8,16 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+ring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
 acf-protocol.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
 
 [lints]
 workspace = true
