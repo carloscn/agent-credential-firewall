@@ -25,7 +25,7 @@ secret_providers:
   enterprise:
     type: external
     adapter: bitwarden
-    config:
+    settings:
       api_server: https://api.bitwarden.com
       identity_server: https://identity.bitwarden.com
       organization_id: organization-id

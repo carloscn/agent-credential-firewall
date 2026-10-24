@@ -2,14 +2,10 @@
 //!
 //! The wire encoding and signature format are fixed in a later ADR (WP-09).
 //! This module defines only the claims.
-//!
-//! Grants have no `constraints` field yet. WP-02 adds the typed constraint
-//! language. Until then `deny_unknown_fields` makes a capability that carries
-//! constraints fail to parse, so the claims fail closed rather than silently
-//! dropping a restriction.
 
 use serde::{Deserialize, Serialize};
 
+use crate::constraints::ConstraintSet;
 use crate::digest::{CertificateThumbprint, Sha256Digest};
 use crate::ids::{ActionName, AudienceId, CapabilityId, IssuerId, PrincipalId, ResourceId, TaskId};
 
@@ -106,6 +102,9 @@ pub struct Grant {
     pub action: ActionName,
     /// Resource the action may target.
     pub resource: ResourceId,
+    /// Narrows the grant; intersected with resource constraints and policy.
+    #[serde(default, skip_serializing_if = "ConstraintSet::is_empty")]
+    pub constraints: ConstraintSet,
 }
 
 /// Usage limits. An absent limit means the capability adds no limit of its
@@ -158,9 +157,17 @@ mod tests {
     }
 
     #[test]
-    fn constraints_fail_closed_until_wp02() {
+    fn grant_constraints_use_the_typed_language() {
         let mut value = design_example();
         value["grants"][0]["constraints"] = json!({ "params.name": { "in": ["api.example.com"] } });
+        let claims: TaskCapabilityClaims = serde_json::from_value(value).unwrap();
+        assert!(!claims.grants[0].constraints.is_empty());
+    }
+
+    #[test]
+    fn unknown_constraint_operators_fail_closed() {
+        let mut value = design_example();
+        value["grants"][0]["constraints"] = json!({ "params.name": { "regex": ".*" } });
         assert!(serde_json::from_value::<TaskCapabilityClaims>(value).is_err());
     }
 
