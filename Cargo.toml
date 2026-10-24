@@ -25,6 +25,18 @@ acf-provider-local = { path = "crates/acf-provider-local" }
 acf-secrets = { path = "crates/acf-secrets" }
 acf-state = { path = "crates/acf-state" }
 
+# External crates. New releases are adopted only after they have been
+# published for at least two weeks, unless a newer release fixes a RustSec
+# advisory (tokio 1.53.3 fixes RUSTSEC-2026-0386).
+async-trait = "0.1.92"
+secrecy = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.152"
+serde-saphyr = { version = "1.3.0", default-features = false, features = ["deserialize"] }
+thiserror = "2.0.21"
+time = { version = "0.3.55", features = ["serde", "formatting", "parsing"] }
+tokio = { version = "1.53.3", features = ["macros", "rt", "rt-multi-thread"] }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"

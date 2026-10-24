@@ -1,0 +1,81 @@
+# Design §7.9 Cloudflare DNS example as a complete configuration bundle.
+schema: acf.config/v1
+
+deployment:
+  profile: production
+  environment: production
+
+secret_providers:
+  production:
+    type: encrypted-local
+    path: /var/lib/acf
+    key_source: systemd-credential
+    rollback_anchor: tpm-nv
+
+profiles:
+  - schema: acf.profile/v1
+    connector: cloudflare
+    revision: 1
+    base_url: https://api.cloudflare.com/client/v4
+    authentication:
+      strategy: bearer
+    actions:
+      cloudflare.dns.records.list:
+        method: GET
+        path: /zones/{resource.zone_id}/dns_records
+        credential_slot: read
+        classification: read
+        params:
+          name: { location: query, type: dns_name }
+          type: { location: query, type: string, enum: [A, AAAA, CNAME, TXT, MX] }
+        response:
+          fields: [success, errors, result.id, result.type, result.name, result.content, result.ttl, result.proxied]
+        audit:
+          record: [name, type]
+      cloudflare.dns.records.create:
+        method: POST
+        path: /zones/{resource.zone_id}/dns_records
+        credential_slot: write
+        classification: mutate
+        params:
+          type: { location: body, type: string, required: true, enum: [A, AAAA, CNAME, TXT] }
+          name: { location: body, type: dns_name, required: true }
+          content: { location: body, type: dns_record_content, required: true, record_type_param: type, max_length: 2048 }
+          ttl: { location: body, type: integer, min: 60, max: 86400 }
+          proxied: { location: body, type: boolean }
+        response:
+          fields: [success, errors, result.id, result.type, result.name, result.content, result.ttl, result.proxied]
+        audit:
+          record: [type, name, content, ttl, proxied]
+
+resources:
+  "cloudflare-zone:example.com":
+    connector: cloudflare
+    environment: production
+    bindings:
+      zone_id: 023e105f4ecef8ad9ca31a8372d0c353
+    credentials:
+      read: secret://production/cloudflare/example.com/dns-read
+      write: secret://production/cloudflare/example.com/dns-write
+    constraints:
+      params.type: { in: [A, AAAA, CNAME, TXT] }
+      params.name:
+        dns_within: example.com
+        not_in: [example.com, mail.example.com]
+        allow_wildcard: false
+      params.ttl: { range: [60, 86400] }
+      quotas: { mutations_per_task: 5 }
+
+secrets:
+  "secret://production/cloudflare/example.com/dns-read":
+    use_binding:
+      connectors: [cloudflare]
+      origins: ["https://api.cloudflare.com"]
+      auth_slot: read
+      environment: production
+  "secret://production/cloudflare/example.com/dns-write":
+    use_binding:
+      connectors: [cloudflare]
+      origins: ["https://api.cloudflare.com"]
+      auth_slot: write
+      environment: production

@@ -532,14 +532,12 @@ Each secret record is also bound to `connector=cloudflare`, `origin=https://api.
 Cloudflare DNS can initially use the generic HTTP connector:
 
 ```yaml
-provider: cloudflare
-version: 1
-
+schema: acf.profile/v1
+connector: cloudflare
+revision: 1
 base_url: https://api.cloudflare.com/client/v4
-
 authentication:
-  bearer:
-    type: bearer
+  strategy: bearer
 
 actions:
   cloudflare.dns.records.list:
@@ -547,30 +545,37 @@ actions:
     path: /zones/{resource.zone_id}/dns_records
     credential_slot: read
     classification: read
-    query_schema:
-      name: { type: dns_name, required: false }
-      type: { enum: [A, AAAA, CNAME, TXT, MX] }
-    response_fields: [success, errors, result.id, result.type, result.name, result.content, result.ttl, result.proxied]
+    params:
+      name: { location: query, type: dns_name }
+      type: { location: query, type: string, enum: [A, AAAA, CNAME, TXT, MX] }
+    response:
+      fields: [success, errors, result.id, result.type, result.name, result.content, result.ttl, result.proxied]
+    audit:
+      record: [name, type]
 
   cloudflare.dns.records.create:
     method: POST
     path: /zones/{resource.zone_id}/dns_records
     credential_slot: write
-    classification: mutate
-    approval: required
-    body_schema:
-      type: object
-      required: [type, name, content]
-      properties:
-        type: { enum: [A, AAAA, CNAME, TXT] }
-        name: { type: dns_name }
-        content: { type: dns_record_content, record_type_field: type, max_length: 2048 }
-        ttl: { type: integer, minimum: 60, maximum: 86400 }
-        proxied: { type: boolean }
+    classification: mutate        # approval is required by default and cannot be disabled
+    params:
+      type: { location: body, type: string, required: true, enum: [A, AAAA, CNAME, TXT] }
+      name: { location: body, type: dns_name, required: true }
+      content: { location: body, type: dns_record_content, required: true, record_type_param: type, max_length: 2048 }
+      ttl: { location: body, type: integer, min: 60, max: 86400 }
+      proxied: { location: body, type: boolean }
+    response:
+      fields: [success, errors, result.id, result.type, result.name, result.content, result.ttl, result.proxied]
     audit:
       record: [type, name, content, ttl, proxied]
-    response_fields: [success, errors, result.id, result.type, result.name, result.content, result.ttl, result.proxied]
 ```
+
+The schema is versioned as `acf.profile/v1`. The loader enforces these rules:
+
+- **Unknown and duplicate keys** are rejected.
+- **`response.fields` is required.** An explicit empty list returns no business payload.
+- **Unlisted parameters** are left out of audit events.
+- **`location: path` parameters** must appear exactly once in the path template as `{params.<name>}`.
 
 `dns_record_content` validates the content according to the record type:
 
@@ -587,17 +592,14 @@ The administrator registers the actual zone and binds credential slots to logica
 
 ```yaml
 resources:
-  cloudflare-zone:example.com:
-    provider: cloudflare
+  "cloudflare-zone:example.com":
+    connector: cloudflare
+    environment: production
     bindings:
       zone_id: 023e105f4ecef8ad9ca31a8372d0c353
-
     credentials:
-      read:
-        secret_ref: secret://production/cloudflare/example.com/dns-read
-      write:
-        secret_ref: secret://production/cloudflare/example.com/dns-write
-
+      read: secret://production/cloudflare/example.com/dns-read
+      write: secret://production/cloudflare/example.com/dns-write
     constraints:
       params.type: { in: [A, AAAA, CNAME, TXT] }
       params.name:
@@ -605,17 +607,16 @@ resources:
         not_in: ["example.com", "mail.example.com"]
         allow_wildcard: false
       params.ttl: { range: [60, 86400] }
-      actions: { deny: [cloudflare.dns.records.delete] }
       quotas: { mutations_per_task: 5 }
 
 secrets:
-  secret://production/cloudflare/example.com/dns-read:
+  "secret://production/cloudflare/example.com/dns-read":
     use_binding:
       connectors: [cloudflare]
       origins: ["https://api.cloudflare.com"]
       auth_slot: read
       environment: production
-  secret://production/cloudflare/example.com/dns-write:
+  "secret://production/cloudflare/example.com/dns-write":
     use_binding:
       connectors: [cloudflare]
       origins: ["https://api.cloudflare.com"]
@@ -624,6 +625,15 @@ secrets:
 ```
 
 The URI beginning with `secret://` is an ACF logical reference, not a secret value. Provider configuration maps its namespace to a concrete local or remote secret store. Resource registrations and secret registrations are administered under separate permissions (§7.2.3).
+
+The loader also cross-checks the resource against its profile:
+
+- **Bindings.** The resource must supply every `{resource.*}` binding the profile's paths use, and no others.
+- **Credential slots.** The resource must supply every credential slot the profile's actions use, and no others.
+- **Secret registrations.** Each secret it references must be registered, and that registration's use binding must permit this connector, the profile's origin, the slot, and the environment.
+- **Constraints.** Constraints may name only parameters that the profile declares. `actions.deny` may name only actions that the profile defines. A typo is rejected instead of silently leaving an action allowed.
+
+The complete example is a test fixture in `crates/acf-config/tests/fixtures/cloudflare-production.yaml`.
 
 The connector normalizes DNS values before policy evaluation: Unicode names are converted to their canonical IDNA form, ASCII is lowercased, a trailing root dot is handled consistently, relative names are rejected, and wildcard syntax is parsed rather than matched as an untrusted raw string. The generic runtime provides typed constraints; connector-specific normalizers provide domain semantics.
 
@@ -862,6 +872,12 @@ Resource registrations, task capabilities, and gateway policy all use the same s
 | `quotas` | Per-task and per-principal counters |
 
 Constraints from different sources are always intersected. The language is not Turing-complete and does no I/O.
+
+Three evaluation rules apply:
+
+- **Undeclared parameters.** A field constraint applies to an action only if the action declares that parameter.
+- **Absent values.** When a constraint applies, a missing value is a violation. Omitting an optional parameter therefore cannot widen a request. For example, a list action constrained to `api.example.com` cannot list the whole zone.
+- **Normalized values only.** Values are compared after normalization. A DNS value that is not already canonical fails the check.
 
 Cedar is the preferred later policy engine (§21). Cedar does not replace the domain normalization in layer 2.
 
@@ -1145,15 +1161,14 @@ ACF resolves a logical `SecretRef` through a configured provider registry:
 secret_providers:
   production:
     type: encrypted-local
-    config:
-      path: /var/lib/acf
-      key_source: systemd-credential
-      rollback_anchor: tpm-nv
+    path: /var/lib/acf
+    key_source: systemd-credential
+    rollback_anchor: tpm-nv
 
   enterprise:
     type: external
     adapter: organization-vault
-    config:
+    settings:
       server: https://vault.example.com
 ```
 

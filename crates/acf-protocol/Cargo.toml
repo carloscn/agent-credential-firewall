@@ -7,5 +7,13 @@ rust-version.workspace = true
 publish.workspace = true
 repository.workspace = true
 
+# acf-protocol must never depend on acf-secrets: response models are then
+# structurally unable to carry secret material (enforced in deny.toml).
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+
 [lints]
 workspace = true
