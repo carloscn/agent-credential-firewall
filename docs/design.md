@@ -232,7 +232,296 @@ Secret values must be represented by types that discourage logging, serializatio
 
 ### 7.6 Action Connectors
 
-Action connectors use credentials without revealing them to the agent. Initial connectors may include:
+Action connectors use credentials without revealing them to the agent. The gateway core must not contain one hard-coded implementation for every token-using service. Connector support is divided into three layers.
+
+#### 7.6.1 Declarative HTTP provider profiles
+
+Most REST APIs that use bearer tokens, API-key headers, or basic authentication should be supported by a generic HTTP connector runtime and an administrator-reviewed provider profile.
+
+A provider profile defines:
+
+- A fixed base URL and allowed ports.
+- Named semantic actions.
+- HTTP method and path templates for each action.
+- Parameter and body schemas.
+- Authentication strategy and credential slot.
+- Redirect behavior.
+- Request and response header filters.
+- Response-field filters.
+- Whether an action is read-only, mutating, or approval-gated.
+
+Provider profiles contain no secret values. Resource registrations bind credential slots to logical `SecretRef` values.
+
+#### 7.6.2 Reusable authentication strategies
+
+The connector runtime should provide a small set of reusable authentication modules:
+
+```rust
+enum AuthenticationStrategy {
+    BearerToken,
+    HeaderApiKey { header: HeaderName },
+    BasicAuth,
+    OAuth2ClientCredentials,
+    OAuth2RefreshToken,
+    AwsSigV4,
+}
+```
+
+Not every strategy must be implemented in the first release. The abstraction prevents authentication behavior from being duplicated across provider profiles.
+
+#### 7.6.3 Native connectors
+
+A dedicated Rust connector is appropriate when a service requires:
+
+- A non-HTTP protocol such as a database or SSH protocol.
+- Complex request signing or key handling.
+- Multi-step transactions, rollback, or conflict detection.
+- Complex OAuth or installation-token exchange.
+- Provider-specific response filtering or safety invariants.
+- Semantics that cannot be expressed safely by the declarative profile.
+
+Initial native connectors may include database execution, SSH certificate use, GitHub App authentication, and Kubernetes API integration.
+
+Native and declarative connectors implement the same interface:
+
+```rust
+pub trait ActionConnector {
+    fn descriptor(&self) -> ConnectorDescriptor;
+
+    async fn execute(
+        &self,
+        context: &AuthorizedContext,
+        request: ActionRequest,
+        credentials: CredentialSet,
+    ) -> Result<ActionResponse, ConnectorError>;
+}
+```
+
+#### 7.6.4 Connector security boundary
+
+Agents select only a logical action, resource, and validated parameters. Agents must not select:
+
+- A secret reference.
+- An authentication strategy.
+- A credential-injection destination.
+- An arbitrary absolute URL.
+- An `Authorization` or API-key header.
+- Redirect behavior.
+
+The gateway resolves these values from trusted provider and resource configuration. A generic unrestricted HTTP proxy would create a secret-exfiltration and server-side request forgery primitive and is therefore forbidden.
+
+OpenAPI documents may be used to generate an initial provider profile, but generated profiles are untrusted input until an administrator reviews their hosts, endpoints, schemas, credential placement, response filtering, and approval requirements.
+
+### 7.7 Example: Cloudflare DNS
+
+This example shows the complete lifecycle for an agent that needs to inspect and create DNS records without receiving a Cloudflare API token.
+
+#### 7.7.1 Credential provisioning
+
+The administrator creates two Cloudflare API tokens scoped to one specific zone:
+
+```text
+acf-example-com-dns-read
+  Permission: Zone / DNS Read
+  Resource:   Specific zone / example.com
+
+acf-example-com-dns-write
+  Permission: Zone / DNS Write
+  Resource:   Specific zone / example.com
+```
+
+Read and write credentials are separated so read-only requests do not expose a write-capable token inside the gateway process. The tokens are stored in Bitwarden, for example:
+
+```text
+Project: acf-cloudflare-production
+
+cloudflare/example.com/dns-read
+cloudflare/example.com/dns-write
+```
+
+Only the appropriate gateway machine account can read this project. The agent has no direct Bitwarden access.
+
+Cloudflare documents `DNS Read` and `DNS Write` as zone permissions and recommends scoped API tokens instead of the legacy global API key. See the [Cloudflare API token permissions](https://developers.cloudflare.com/fundamentals/api/reference/permissions/).
+
+#### 7.7.2 Declarative provider profile
+
+Cloudflare DNS can initially use the generic HTTP connector:
+
+```yaml
+provider: cloudflare
+version: 1
+
+base_url: https://api.cloudflare.com/client/v4
+
+authentication:
+  bearer:
+    type: bearer
+
+actions:
+  cloudflare.dns.records.list:
+    method: GET
+    path: /zones/{zone_id}/dns_records
+    credential_slot: read
+    classification: read
+    query_schema:
+      name: { type: dns_name, required: false }
+      type: { enum: [A, AAAA, CNAME, TXT, MX] }
+
+  cloudflare.dns.records.create:
+    method: POST
+    path: /zones/{zone_id}/dns_records
+    credential_slot: write
+    classification: mutate
+    approval: required
+    body_schema:
+      type: object
+      required: [type, name, content]
+      properties:
+        type: { enum: [A, AAAA, CNAME, TXT] }
+        name: { type: dns_name }
+        content: { type: string }
+        ttl: { type: integer, minimum: 60, maximum: 86400 }
+        proxied: { type: boolean }
+```
+
+The list and create actions map to Cloudflare's documented `GET /zones/{zone_id}/dns_records` and `POST /zones/{zone_id}/dns_records` endpoints. See the [Cloudflare DNS Records API](https://developers.cloudflare.com/api/resources/dns/subresources/records/).
+
+#### 7.7.3 Resource registration
+
+The administrator registers the actual zone and binds credential slots to logical Bitwarden references:
+
+```yaml
+resources:
+  cloudflare-zone:example.com:
+    provider: cloudflare
+    bindings:
+      zone_id: 023e105f4ecef8ad9ca31a8372d0c353
+
+    credentials:
+      read:
+        secret_ref: bitwarden://cloudflare/example.com/dns-read
+      write:
+        secret_ref: bitwarden://cloudflare/example.com/dns-write
+
+    constraints:
+      allowed_record_types: [A, AAAA, CNAME, TXT]
+      allowed_names: ["*.example.com"]
+      denied_names: ["example.com", "mail.example.com"]
+      allow_wildcard_records: false
+      allow_delete: false
+      min_ttl: 60
+      max_ttl: 86400
+      max_changes_per_task: 5
+```
+
+The URI beginning with `bitwarden://` is an ACF logical reference, not a secret value and not necessarily a native Bitwarden URI format.
+
+#### 7.7.4 Query interaction
+
+The user asks the agent to inspect `api.example.com`. The orchestrator grants a short-lived task capability containing:
+
+```json
+{
+  "taskId": "dns-change-892",
+  "actions": ["cloudflare.dns.records.list"],
+  "resources": ["cloudflare-zone:example.com"],
+  "constraints": {
+    "names": ["api.example.com"],
+    "recordTypes": ["A"]
+  },
+  "expiresAt": "2026-10-24T18:15:00Z",
+  "jti": "capability-01JB..."
+}
+```
+
+The agent submits a semantic request:
+
+```json
+{
+  "requestId": "req-001",
+  "taskId": "dns-change-892",
+  "action": "cloudflare.dns.records.list",
+  "resource": "cloudflare-zone:example.com",
+  "parameters": {
+    "name": "api.example.com",
+    "type": "A"
+  }
+}
+```
+
+The gateway:
+
+1. Verifies connection identity and the task capability.
+2. Confirms that the action, zone, name, and record type are allowed.
+3. Resolves the resource's `read` credential slot.
+4. Retrieves the read token from Bitwarden.
+5. Injects the bearer token into the fixed Cloudflare request.
+6. Filters the provider response.
+7. Returns DNS data without returning the token.
+8. Emits a redacted audit event.
+
+#### 7.7.5 Mutating interaction and approval
+
+To create a record, the agent submits:
+
+```json
+{
+  "requestId": "req-002",
+  "taskId": "dns-change-892",
+  "action": "cloudflare.dns.records.create",
+  "resource": "cloudflare-zone:example.com",
+  "parameters": {
+    "type": "A",
+    "name": "api.example.com",
+    "content": "203.0.113.10",
+    "ttl": 300,
+    "proxied": true
+  }
+}
+```
+
+Before retrieving the write credential, the gateway validates the task capability, record name, zone suffix, record type, content, TTL, mutation count, and applicable policy. It may also issue a read request to detect conflicts.
+
+Because the action is approval-gated, the gateway returns an exact proposed change:
+
+```json
+{
+  "status": "approval_required",
+  "approvalId": "approval-123",
+  "change": {
+    "zone": "example.com",
+    "operation": "create",
+    "record": {
+      "type": "A",
+      "name": "api.example.com",
+      "content": "203.0.113.10",
+      "ttl": 300,
+      "proxied": true
+    }
+  },
+  "expiresAt": "2026-10-24T18:10:00Z"
+}
+```
+
+Approval must bind the approver, request hash, action, resource, exact parameters, and expiration time. The agent cannot approve its own request. Any parameter change invalidates the approval.
+
+After approval, the gateway revalidates the complete request, resolves the `write` credential slot, retrieves the write token, calls Cloudflare, filters the result, and records the outcome. Replay protection prevents the approved mutation from being submitted twice.
+
+#### 7.7.6 Audit and rotation
+
+The audit event records identity, task, action, logical resource, approval, logical secret reference, requested DNS change, provider result, and timestamps. It never records the bearer token, authorization header, Bitwarden access token, or private keys.
+
+Token rotation is an administrative workflow:
+
+1. Create a new scoped Cloudflare token.
+2. Verify that the token is active through Cloudflare's token verification endpoint.
+3. Update the corresponding Bitwarden secret.
+4. Validate gateway use of the new token.
+5. Revoke the old Cloudflare token.
+
+For higher assurance, read and write credentials may be placed in separate Bitwarden projects and consumed by separate gateway security domains. This limits a compromised read path from becoming a DNS mutation path.
+
+This example illustrates the general ACF model: every service and resource is explicitly registered, but ordinary token-based REST services are added through reviewed profiles and configuration rather than one-off gateway code.
 
 - Generic HTTP bearer-token proxy with strict host, path, and method allowlists.
 - GitHub operations scoped to approved organizations and repositories.

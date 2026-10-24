@@ -300,7 +300,7 @@ Primary file ownership:
 - `/crates/acf-bitwarden/`
 - Bitwarden-specific integration tests and documentation
 
-### WP-05 — Restricted HTTP action connector
+### WP-05 — Declarative connector runtime and restricted HTTP connector
 
 Dependencies: WP-01, policy models from WP-02
 
@@ -309,30 +309,57 @@ This package may begin in parallel with WP-03 and WP-04 once protocol and policy
 Deliverables:
 
 - `ActionConnector` trait.
-- HTTP connector with resource-based configuration.
+- Versioned declarative provider-profile schema.
+- HTTP connector runtime with provider-profile and resource configuration.
+- Reusable bearer-token and API-key-header authentication strategies.
+- Named semantic actions with fixed method and path templates.
+- Parameter, query, and request-body schema validation.
 - Credential injection performed inside the connector.
 - Host, scheme, port, method, and path allowlists.
 - Redirect policy.
 - Request and response header filtering.
+- Response-field filtering.
 - DNS and address validation to reduce server-side request forgery risk.
 - Body and response size limits.
+- Cloudflare DNS profile fixture covering list and create-record actions.
 
-Example resource configuration:
+Example provider profile:
+
+```yaml
+provider: example-api
+version: 1
+base_url: https://api.example.test
+
+authentication:
+  bearer:
+    type: bearer
+
+actions:
+  example.profile.get:
+    method: GET
+    path: /profile
+    credential_slot: read
+    classification: read
+```
+
+Example resource registration:
 
 ```yaml
 resources:
-  demo-api:
-    base_url: https://api.example.test
-    secret_ref: bitwarden://secret/example-id
-    authorization:
-      scheme: bearer
-    allowed_methods: [GET]
-    allowed_paths: [/profile]
+  example-api:production:
+    provider: example-api
+    credentials:
+      read:
+        secret_ref: bitwarden://example-api/production/read
 ```
+
+Provider profiles and resource registrations contain secret references, never secret values. Agents provide only the logical action, logical resource, and schema-validated parameters.
 
 The connector must reject:
 
 - Agent-supplied absolute URLs.
+- Agent-supplied secret references or credential slots.
+- Agent-selected authentication strategies.
 - Agent-supplied authorization headers.
 - Unsupported URL schemes.
 - Unknown hosts or ports.
@@ -345,6 +372,9 @@ Acceptance criteria:
 
 - The connector successfully calls the local test upstream with an injected canary credential.
 - The canary credential is not present in the connector response or logs.
+- A Cloudflare profile can express DNS-record list and create operations without Cloudflare-specific Rust code.
+- Provider profiles cannot override the runtime's mandatory redirect, address, or header security controls.
+- Invalid or unreviewed profile versions fail closed.
 - Negative tests cover host confusion, redirects, encoded traversal, DNS/address restrictions, and header injection.
 
 Primary file ownership:
