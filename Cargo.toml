@@ -1,0 +1,50 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.92"
+publish = false
+repository = "https://github.com/carloscn/agent-credential-firewall"
+
+# Internal crates. Dependency direction is documented in
+# docs/implementation-plan.md §5 and enforced for providers in deny.toml.
+[workspace.dependencies]
+acf-agent = { path = "crates/acf-agent" }
+acf-audit = { path = "crates/acf-audit" }
+acf-config = { path = "crates/acf-config" }
+acf-connectors = { path = "crates/acf-connectors" }
+acf-control-plane = { path = "crates/acf-control-plane" }
+acf-gateway = { path = "crates/acf-gateway" }
+acf-identity = { path = "crates/acf-identity" }
+acf-policy = { path = "crates/acf-policy" }
+acf-protocol = { path = "crates/acf-protocol" }
+acf-provider-local = { path = "crates/acf-provider-local" }
+acf-secrets = { path = "crates/acf-secrets" }
+acf-state = { path = "crates/acf-state" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Panicking and debugging shortcuts are not acceptable in a credential gateway.
+dbg_macro = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+unwrap_used = "warn"
+# Direct printing bypasses redaction; output must go through tracing or audit sinks.
+print_stderr = "warn"
+print_stdout = "warn"
+mem_forget = "warn"
+
+[profile.release]
+overflow-checks = true
