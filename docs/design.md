@@ -489,7 +489,84 @@ Example action request:
 }
 ```
 
-## 17. MVP scope
+## 17. Implementation technology
+
+### 17.1 Decision
+
+The security-sensitive data plane will be implemented in Rust. This includes:
+
+- Credential Gateway.
+- Local Agent Daemon.
+- Bitwarden Secrets Manager adapter.
+- Identity and policy enforcement interfaces.
+- Action connectors.
+- Task-capability validation and audit event generation.
+
+The management control plane and web interface are not required to use Rust. They may use the technologies most appropriate for their product and operational requirements, provided they communicate with the data plane through authenticated, versioned interfaces.
+
+### 17.2 Rationale
+
+Rust is selected because it:
+
+- Can consume the native Rust Bitwarden Secrets Manager SDK without an additional language binding or FFI boundary.
+- Provides memory and type safety appropriate for a long-running, high-privilege gateway.
+- Produces self-contained binaries suitable for endpoints and VPS deployments.
+- Supports a shared protocol and security-type implementation across the gateway and local daemon.
+- Has mature asynchronous networking and TLS libraries.
+- Allows secret-bearing types to restrict accidental formatting, cloning, serialization, and logging.
+
+Rust memory safety does not by itself prevent secret exposure. Logs, traces, crash dumps, child processes, connector behavior, and downstream requests remain part of the security boundary.
+
+### 17.3 Initial stack
+
+The initial implementation should prefer:
+
+| Concern | Technology |
+| --- | --- |
+| Async runtime | Tokio |
+| HTTP server | Axum |
+| HTTP client | Reqwest with rustls |
+| TLS and mTLS | rustls |
+| Serialization | Serde |
+| CLI | Clap |
+| Secret-bearing values | `secrecy` and `zeroize` |
+| Structured telemetry | `tracing` |
+| Bitwarden integration | Native Rust Secrets Manager SDK |
+
+The first protocol should use HTTP/2 with JSON over TLS rather than a custom transport. gRPC may be added later if measurements demonstrate a need.
+
+### 17.4 Workspace structure
+
+The repository should use a Cargo workspace with explicit security boundaries:
+
+```text
+crates/
+├── acf-gateway/          # Gateway service and request lifecycle
+├── acf-agent/            # Endpoint and VPS daemon
+├── acf-protocol/         # API models and task capabilities
+├── acf-identity/         # Pluggable connection identity providers
+├── acf-policy/           # Authorization decisions
+├── acf-secrets/          # SecretProvider traits and protected types
+├── acf-bitwarden/        # Bitwarden SDK adapter
+├── acf-connectors/       # Downstream action connectors
+└── acf-audit/            # Structured audit events
+```
+
+Shared crates must preserve dependency direction: provider and connector implementations may depend on core interfaces, but core policy and protocol crates must not depend on a particular provider.
+
+### 17.5 Secret-handling requirements
+
+Rust code that handles secret material must:
+
+- Use dedicated secret-bearing types instead of ordinary `String` values where practical.
+- Avoid implementing or deriving `Debug`, `Display`, `Serialize`, or `Clone` for plaintext secret types.
+- Redact secret fields from errors, traces, metrics, and audit events.
+- Minimize plaintext lifetime and the number of memory copies.
+- Zeroize owned plaintext buffers when their lifecycle ends where the implementation can do so reliably.
+- Avoid passing secrets in command-line arguments or persisting them to disk.
+- Document unavoidable plaintext boundaries, including TLS libraries and downstream SDKs.
+
+## 18. MVP scope
 
 ### Phase 1 — foundation
 
@@ -517,9 +594,8 @@ Example action request:
 - Automated incident-response workflows.
 - Additional secret providers and action connectors.
 
-## 18. Open questions
+## 19. Open questions
 
-- Which language should be used for the gateway and local daemon?
 - Should policy use OPA/Rego, Cedar, or a smaller purpose-built model?
 - How should an orchestrator prove task provenance?
 - Which operations require human approval by default?
@@ -529,7 +605,7 @@ Example action request:
 - What is the acceptable behavior during Bitwarden or identity-provider outages?
 - Should tenants receive dedicated gateway instances or isolated logical partitions?
 
-## 19. Security principles
+## 20. Security principles
 
 1. Prefer actions over secrets.
 2. Treat every agent as potentially influenced by hostile input.
