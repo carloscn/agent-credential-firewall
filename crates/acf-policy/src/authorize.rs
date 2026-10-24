@@ -113,6 +113,37 @@ pub enum DecisionReason {
 }
 
 impl DecisionReason {
+    /// A stable code for audit events. More specific than [`Self::denial`];
+    /// it names only configuration-defined parameters, never values.
+    #[must_use]
+    pub fn code(&self) -> String {
+        let fixed = match self {
+            Self::IdentityAssuranceRejected => "identity_assurance_rejected",
+            Self::DevelopmentTaskRejected => "development_task_rejected",
+            Self::CapabilityNotYetValid => "capability_not_yet_valid",
+            Self::CapabilityExpired => "capability_expired",
+            Self::CapabilityWrongAudience => "capability_wrong_audience",
+            Self::CertificateMismatch => "certificate_mismatch",
+            Self::CapabilityTaskMismatch => "capability_task_mismatch",
+            Self::CapabilityNotGranted => "capability_not_granted",
+            Self::CapabilityAmbiguousGrant => "capability_ambiguous_grant",
+            Self::UnknownResource => "unknown_resource",
+            Self::UnknownAction => "unknown_action",
+            Self::InvalidParameters(_) => "invalid_parameters",
+            Self::PolicyNoMatchingRule => "policy_no_matching_rule",
+            Self::ConstraintViolation(layer, violation) => {
+                let layer = match layer {
+                    ConstraintLayer::Resource => "resource",
+                    ConstraintLayer::Capability => "capability",
+                    ConstraintLayer::Policy => "policy",
+                };
+                return format!("constraint_violation:{layer}:{}", violation.subject);
+            }
+            Self::PolicyDeniedByRule(rule) => return format!("policy_denied_by_rule:{rule}"),
+        };
+        fixed.to_owned()
+    }
+
     /// The code returned to the agent.
     #[must_use]
     pub fn denial(&self) -> DenialReason {

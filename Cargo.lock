@@ -23,6 +23,13 @@ name = "acf-audit"
 version = "0.0.0"
 dependencies = [
  "acf-protocol",
+ "async-trait",
+ "ring",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "time",
+ "tokio",
 ]
 
 [[package]]
@@ -81,6 +88,7 @@ dependencies = [
  "async-trait",
  "axum",
  "clap",
+ "getrandom 0.4.3",
  "reqwest",
  "serde",
  "serde_json",

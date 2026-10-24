@@ -13,7 +13,7 @@ Identity-aware, task-scoped credential gateway for AI agents.
 
 ## Status
 
-WP-00 through WP-05 are implemented. The Milestone 0 development demo, where an agent reads a profile through the gateway without receiving the token, is in [`examples/m0`](examples/m0/README.md). The gateway runs only with the `development` feature and deployment profile until TLS client identity (WP-08) and production validation (WP-11) land.
+Milestone 0 (WP-00 through WP-06) is implemented. The development demo, where an agent reads a profile through the gateway without receiving the token, is in [`examples/m0`](examples/m0/README.md). Every request produces audit events, and a canary leak harness runs the real gateway binary and scans its responses, stdout, stderr, and audit log. The gateway runs only with the `development` feature and deployment profile until TLS client identity (WP-08) and production validation (WP-11) land.
 
 ## Development
 

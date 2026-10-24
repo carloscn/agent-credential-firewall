@@ -34,10 +34,15 @@ acf-state.workspace = true
 acf-identity = { workspace = true, features = ["development"] }
 acf-secrets = { workspace = true, features = ["in-memory"] }
 async-trait.workspace = true
+getrandom.workspace = true
 reqwest.workspace = true
 
 [[test]]
 name = "gateway"
+required-features = ["development"]
+
+[[test]]
+name = "leak"
 required-features = ["development"]
 
 [lints]

@@ -15,9 +15,10 @@ mod development {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    use acf_audit::{AuditHasher, GatewayInfo, JsonLinesSink};
     use acf_config::{DeploymentProfile, SecretProviderConfig, load_yaml};
     use acf_connectors::{HttpConnector, HttpLimits, NetworkPolicy, SystemResolver};
-    use acf_gateway::{Gateway, ProviderRegistry, ServerLimits, router};
+    use acf_gateway::{AuditSettings, Gateway, ProviderRegistry, ServerLimits, router};
     use acf_identity::DevelopmentIdentityProvider;
     use acf_policy::{Authorizer, AuthorizerSettings};
     use acf_protocol::{AudienceId, PrincipalId};
@@ -47,6 +48,12 @@ mod development {
         /// from the environment variable, never from the command line.
         #[arg(long = "secret-env", value_name = "REF=ENV_VAR")]
         secret_env: Vec<String>,
+        /// Append audit events as JSON lines to this file. Default: stderr.
+        #[arg(long)]
+        audit_log: Option<PathBuf>,
+        /// Gateway identifier recorded in audit events.
+        #[arg(long, default_value = "acf-gateway-dev")]
+        gateway_id: String,
     }
 
     pub(crate) async fn run() -> Result<(), String> {
@@ -125,8 +132,9 @@ mod development {
             )
             .map_err(|e| e.to_string())?,
         );
-        let gateway =
-            Gateway::new(authorizer, identity, registry, connector).map_err(|e| e.to_string())?;
+        let audit = audit_settings(args.audit_log.as_ref(), args.gateway_id)?;
+        let gateway = Gateway::new(authorizer, identity, registry, connector, audit)
+            .map_err(|e| e.to_string())?;
 
         let listener = tokio::net::TcpListener::bind(args.listen)
             .await
@@ -138,6 +146,31 @@ mod development {
         axum::serve(listener, router(Arc::new(gateway), ServerLimits::default()))
             .await
             .map_err(|e| e.to_string())
+    }
+
+    /// Fail-closed JSON-lines audit to a file, or to stderr.
+    fn audit_settings(path: Option<&PathBuf>, gateway_id: String) -> Result<AuditSettings, String> {
+        let writer: Box<dyn std::io::Write + Send> = match path {
+            Some(path) => Box::new(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .map_err(|e| format!("cannot open audit log {}: {e}", path.display()))?,
+            ),
+            None => Box::new(std::io::stderr()),
+        };
+        Ok(AuditSettings {
+            sink: Arc::new(JsonLinesSink::new(writer)),
+            hasher: AuditHasher::random().map_err(|e| e.to_string())?,
+            // An allowed request runs only after its decision is recorded.
+            required: true,
+            gateway: GatewayInfo {
+                id: gateway_id,
+                build: "development".to_owned(),
+                deployment_profile: "development".to_owned(),
+            },
+        })
     }
 
     #[expect(

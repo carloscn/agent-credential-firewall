@@ -13,4 +13,4 @@ mod http;
 mod pipeline;
 
 pub use http::{ServerLimits, router};
-pub use pipeline::{Gateway, GatewayError, ProviderRegistry};
+pub use pipeline::{AuditSettings, Gateway, GatewayError, ProviderRegistry};
