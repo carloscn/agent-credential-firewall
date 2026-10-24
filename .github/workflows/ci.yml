@@ -53,11 +53,11 @@ jobs:
 
   audit:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      checks: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # --locked builds with cargo-audit's own lockfile; without it, newer
+      # transitive releases can require a newer rustc than the pinned toolchain.
+      - run: cargo install --locked cargo-audit@0.22.2
+      - run: cargo audit
