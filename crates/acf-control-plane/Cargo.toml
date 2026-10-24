@@ -1,0 +1,19 @@
+[package]
+name = "acf-control-plane"
+description = "Capability Authority and Approval Service."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+acf-audit.workspace = true
+acf-config.workspace = true
+acf-identity.workspace = true
+acf-policy.workspace = true
+acf-protocol.workspace = true
+acf-state.workspace = true
+
+[lints]
+workspace = true

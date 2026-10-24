@@ -1,0 +1,16 @@
+[package]
+name = "acf-connectors"
+description = "Semantic action connectors, authentication strategies, and domain types."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+acf-config.workspace = true
+acf-protocol.workspace = true
+acf-secrets.workspace = true
+
+[lints]
+workspace = true

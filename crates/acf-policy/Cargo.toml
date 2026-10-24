@@ -1,0 +1,16 @@
+[package]
+name = "acf-policy"
+description = "Authorization decisions and constraint composition."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+acf-config.workspace = true
+acf-identity.workspace = true
+acf-protocol.workspace = true
+
+[lints]
+workspace = true
