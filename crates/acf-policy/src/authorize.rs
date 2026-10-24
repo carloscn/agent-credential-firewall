@@ -215,6 +215,19 @@ impl Authorizer {
         self.config.deployment().profile == DeploymentProfile::Production
     }
 
+    /// Runs only the identity and task-capability layers, which never look at
+    /// configuration. The gateway calls this before it looks up the action to
+    /// normalize parameters, so an unauthorized caller cannot probe which
+    /// resources exist. `request.params` is ignored.
+    ///
+    /// # Errors
+    ///
+    /// Returns the identity or capability [`DecisionReason`].
+    pub fn pre_authorize(&self, request: &AuthorizationRequest<'_>) -> Result<(), DecisionReason> {
+        self.check_identity_provider(request.identity.assurance)?;
+        self.check_task(request).map(drop)
+    }
+
     /// Authorizes one request.
     ///
     /// # Errors

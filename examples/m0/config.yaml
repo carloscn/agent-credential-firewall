@@ -1,0 +1,41 @@
+# Milestone 0 demo: one read action against the local upstream in upstream.py.
+schema: acf.config/v1
+
+deployment:
+  profile: development
+  environment: development
+
+secret_providers:
+  development:
+    type: in-memory
+
+profiles:
+  - schema: acf.profile/v1
+    connector: example-api
+    revision: 1
+    base_url: http://127.0.0.1:8080
+    authentication:
+      strategy: bearer
+    actions:
+      example.profile.get:
+        method: GET
+        path: /profile
+        credential_slot: read
+        classification: read
+        response:
+          fields: [user, authenticated]
+
+resources:
+  "example-api:development":
+    connector: example-api
+    environment: development
+    credentials:
+      read: secret://development/example-api/read
+
+secrets:
+  "secret://development/example-api/read":
+    use_binding:
+      connectors: [example-api]
+      origins: ["http://127.0.0.1:8080"]
+      auth_slot: read
+      environment: development

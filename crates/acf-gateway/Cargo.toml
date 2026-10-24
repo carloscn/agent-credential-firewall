@@ -7,7 +7,19 @@ rust-version.workspace = true
 publish.workspace = true
 repository.workspace = true
 
+[features]
+# Development wiring: in-memory secret provider, fixed development identity,
+# and plaintext loopback listener. Release builds must not enable it.
+development = ["acf-secrets/in-memory", "acf-identity/development"]
+
 [dependencies]
+axum.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
 acf-audit.workspace = true
 acf-config.workspace = true
 acf-connectors.workspace = true
@@ -17,6 +29,16 @@ acf-protocol.workspace = true
 acf-provider-local.workspace = true
 acf-secrets.workspace = true
 acf-state.workspace = true
+
+[dev-dependencies]
+acf-identity = { workspace = true, features = ["development"] }
+acf-secrets = { workspace = true, features = ["in-memory"] }
+async-trait.workspace = true
+reqwest.workspace = true
+
+[[test]]
+name = "gateway"
+required-features = ["development"]
 
 [lints]
 workspace = true
