@@ -7,6 +7,7 @@
 mod action;
 mod approval;
 mod capability;
+mod constraints;
 mod digest;
 mod ids;
 mod operation;
@@ -16,6 +17,10 @@ pub use approval::{APPROVAL_OBJECT_VERSION, ApprovalObject};
 pub use capability::{
     AuthorizationBasis, Confirmation, Grant, HumanAuthMethod, Limits, TaskCapabilityClaims,
     TaskInfo,
+};
+pub use constraints::{
+    ConstraintError, ConstraintSet, ConstraintViolation, DnsZone, FieldConstraint, GlobPattern,
+    IntRange, ParamName, Quotas, Scalar, ViolationKind,
 };
 pub use digest::{CertificateThumbprint, DigestError, Sha256Digest};
 pub use ids::{
