@@ -37,6 +37,9 @@ deny = [
     # Core crates must not depend on a concrete secret provider.
     # Only the gateway composition root may link the encrypted local provider.
     { crate = "acf-provider-local", wrappers = ["acf-gateway"], reason = "core crates must stay provider-neutral" },
+    # Secret material stays out of the protocol, daemon, control plane, policy,
+    # state, and audit crates; responses then cannot carry it.
+    { crate = "acf-secrets", wrappers = ["acf-config", "acf-connectors", "acf-provider-local", "acf-gateway"], reason = "only these crates may handle secret material" },
     # TLS goes through rustls (design §19.3).
     { crate = "openssl", reason = "use rustls" },
     { crate = "openssl-sys", reason = "use rustls" },

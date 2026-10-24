@@ -1,4 +1,25 @@
-//! API, task, approval, and operation models shared by the daemon, gateway, and control plane.
+//! API, task, approval, and operation models shared by the daemon, gateway,
+//! and control plane.
 //!
-//! Implemented by WP-01 in `docs/implementation-plan.md`. This is a WP-00
-//! skeleton with no behavior yet.
+//! This crate does not depend on `acf-secrets`, so none of its types can hold
+//! secret material. `deny.toml` keeps that dependency out.
+
+mod action;
+mod approval;
+mod capability;
+mod digest;
+mod ids;
+mod operation;
+
+pub use action::{ActionRequest, ActionResponse, DenialReason};
+pub use approval::{APPROVAL_OBJECT_VERSION, ApprovalObject};
+pub use capability::{
+    AuthorizationBasis, Confirmation, Grant, HumanAuthMethod, Limits, TaskCapabilityClaims,
+    TaskInfo,
+};
+pub use digest::{CertificateThumbprint, DigestError, Sha256Digest};
+pub use ids::{
+    ActionName, AgentId, ApprovalId, ApprovalNonce, AudienceId, CapabilityId, DeviceId, IdError,
+    IdempotencyKey, IssuerId, MAX_ID_LEN, OperationId, PrincipalId, RequestId, ResourceId, TaskId,
+};
+pub use operation::{OperationState, OperationStatus};
