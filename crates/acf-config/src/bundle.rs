@@ -275,6 +275,11 @@ impl ValidatedConfig {
         self.providers.get(namespace)
     }
 
+    /// Every configured provider, by namespace.
+    pub fn providers(&self) -> impl Iterator<Item = (&Namespace, &SecretProviderConfig)> {
+        self.providers.iter()
+    }
+
     /// Connector profile.
     #[must_use]
     pub fn profile(&self, connector: &ConnectorName) -> Option<&ConnectorProfile> {

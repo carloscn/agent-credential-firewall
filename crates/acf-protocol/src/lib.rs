@@ -12,7 +12,7 @@ mod digest;
 mod ids;
 mod operation;
 
-pub use action::{ActionRequest, ActionResponse, DenialReason};
+pub use action::{ActionRequest, ActionResponse, DenialReason, FailureReason};
 pub use approval::{APPROVAL_OBJECT_VERSION, ApprovalObject};
 pub use capability::{
     AuthorizationBasis, Confirmation, Grant, HumanAuthMethod, Limits, TaskCapabilityClaims,

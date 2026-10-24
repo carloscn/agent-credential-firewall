@@ -89,6 +89,38 @@ pub enum ActionResponse {
         /// Machine-readable reason.
         reason: DenialReason,
     },
+    /// The request was authorized, but executing it failed.
+    Failed {
+        /// Request this answers.
+        request_id: RequestId,
+        /// Machine-readable reason.
+        reason: FailureReason,
+    },
+}
+
+/// Machine-readable execution failures. Like denials, they carry no detail
+/// that could echo agent input, configuration, or credentials.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureReason {
+    /// The secret provider could not supply the credential.
+    CredentialUnavailable,
+    /// The credential cannot be used for this destination or encoding.
+    CredentialUnusable,
+    /// The destination was refused by the network policy.
+    DestinationRefused,
+    /// The request could not be built from the action contract.
+    RequestInvalid,
+    /// The downstream service timed out. For a mutation, the outcome is unknown.
+    DownstreamTimeout,
+    /// The downstream service could not be reached.
+    DownstreamUnavailable,
+    /// The downstream response was too large, not JSON, or a redirect.
+    DownstreamResponseInvalid,
+    /// The downstream response contained the credential and was discarded.
+    CredentialReflected,
+    /// The gateway did not finish within its time limit.
+    GatewayTimeout,
 }
 
 /// Machine-readable denial reasons.

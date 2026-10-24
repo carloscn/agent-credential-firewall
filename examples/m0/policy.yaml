@@ -1,0 +1,9 @@
+# Milestone 0 demo policy: the development identity may read its profile.
+schema: acf.policy/v1
+version: m0-demo.1
+rules:
+  - id: dev-agent-profile
+    effect: allow
+    principals: [dev-agent]
+    actions: [example.profile.get]
+    resources: ["example-api:development"]
