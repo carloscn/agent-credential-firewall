@@ -7,8 +7,19 @@ rust-version.workspace = true
 publish.workspace = true
 repository.workspace = true
 
+[features]
+# Fixed development identity. Release builds must not enable it, and the
+# authorizer rejects its assurance level under the `production` profile.
+development = []
+
 [dependencies]
 acf-protocol.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
 
 [lints]
 workspace = true

@@ -70,6 +70,10 @@ name = "acf-identity"
 version = "0.0.0"
 dependencies = [
  "acf-protocol",
+ "async-trait",
+ "serde",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -79,6 +83,9 @@ dependencies = [
  "acf-config",
  "acf-identity",
  "acf-protocol",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
