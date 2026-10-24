@@ -63,9 +63,9 @@ Milestone 1 is complete only when all of the following are true:
 - The agent receives a filtered upstream response without the credential.
 - Unknown resources, methods, paths, and destinations are rejected.
 - Secret values do not appear in application logs, audit events, errors, or HTTP responses.
-- No secret is persisted to disk by ACF.
+- No plaintext secret is persisted to disk by ACF.
 - Unit, integration, and negative security tests pass in CI.
-- The same end-to-end test can run with a mock provider and the Bitwarden provider.
+- The same end-to-end test can run with the in-memory provider and the encrypted local provider.
 
 ## 4. Delivery strategy
 
@@ -74,7 +74,7 @@ Implementation proceeds in three stages:
 ```text
 Stage A: Safe local vertical slice
         ↓
-Stage B: Real Bitwarden and authenticated transport
+Stage B: Encrypted persistent provider and authenticated transport
         ↓
 Stage C: Production hardening
 ```
@@ -93,7 +93,7 @@ crates/
 ├── acf-identity/         # Connection identity providers
 ├── acf-policy/           # Authorization inputs and decisions
 ├── acf-secrets/          # SecretProvider trait and protected types
-├── acf-bitwarden/        # Bitwarden Secrets Manager adapter
+├── acf-provider-local/   # Encrypted local provider
 ├── acf-connectors/       # Downstream action connectors
 └── acf-audit/            # Structured, redacted audit events
 
@@ -106,6 +106,9 @@ integrations/
         ├── acf-actions/
         ├── acf-cloudflare-dns/
         └── acf-connector-authoring/
+
+providers/
+└── README.md             # Optional external-provider adapter contract
 ```
 
 Dependency direction:
@@ -121,7 +124,7 @@ acf-protocol     acf-policy     acf-secrets     acf-audit
 Rules:
 
 - Core interface crates must not depend on concrete providers.
-- `acf-bitwarden` may depend on `acf-secrets`; the reverse is forbidden.
+- Provider implementations may depend on `acf-secrets`; the reverse is forbidden.
 - Connectors may consume protected secret types but must not expose them through protocol models.
 - API response types must not contain `SecretMaterial`.
 - Binaries should have thin entry points; behavior belongs in testable libraries.
@@ -269,7 +272,7 @@ Primary file ownership:
 - `/crates/acf-agent/`
 - `/tests/e2e/`, if introduced
 
-### WP-04 — Bitwarden provider spike and adapter
+### WP-04 — Provider registry and encrypted local provider
 
 Dependencies: WP-00, `SecretProvider` from WP-01
 
@@ -277,39 +280,46 @@ This package may begin in parallel with WP-02 and WP-03 after the `SecretProvide
 
 Deliverables:
 
-- A minimal technical spike proving SDK initialization, authentication, and secret retrieval.
-- Production-shaped `BitwardenSecretProvider` adapter.
-- Configuration for server URL, organization/project scope, and secret references.
-- Bounded session behavior and explicit error mapping.
-- Mockable wrapper around the external SDK boundary.
-- Integration test instructions that do not require contributors to commit credentials.
+- Provider registry mapping logical `secret://<namespace>/...` references to implementations.
+- Production-shaped `EncryptedLocalSecretProvider` adapter.
+- Versioned, authenticated-encryption storage format.
+- `KeySource` interface for TPM/KMS, operating-system credentials, mounted files, and interactive unlock implementations.
+- Separate administrative commands for initialize, put, rotate, list metadata, backup, and restore.
+- Atomic writes, file locking, rollback-safe updates, and strict filesystem permissions.
+- In-memory provider for deterministic tests.
+- Provider conformance suite reusable by optional external adapters.
 
 Questions the spike must answer:
 
-- Which SDK crate and versioning strategy will be used?
-- How is the SDK client initialized and reused safely?
-- What values are returned in SDK errors?
+- Which reviewed authenticated-encryption library and versioned envelope format will be used?
+- How are nonces generated and uniqueness enforced?
+- How are the data-encryption key and key-encryption key separated?
+- How are concurrent readers, rotations, crashes, and partial writes handled?
+- How are backups restored without silently rolling back policy or secret versions?
 - How many plaintext copies are created during retrieval and conversion?
-- How does authentication/session expiration appear to the caller?
-- Which operations are stable across the SDK version selected for the MVP?
+- How does a provider report locked, unavailable, corrupted, and authentication-failed states without leaking data?
 
 Development bootstrap:
 
-- A Bitwarden access token may be supplied through an environment variable for local development only.
-- The token must never be accepted as a CLI argument.
-- Tests and documentation must use placeholders, never real credentials.
+- Tests use generated ephemeral keys and temporary directories.
+- Development may use an explicitly marked insecure key source that is rejected by production configuration validation.
+- Raw encryption keys and secret values must never be accepted as command-line arguments.
+- Fixtures and documentation use canary placeholders, never real credentials.
 
 Acceptance criteria:
 
-- A manually enabled integration test retrieves one test secret by reference.
-- Unit tests run without network access or real credentials.
-- SDK errors are mapped without logging credentials or secret values.
-- The adapter returns `SecretMaterial`, not a raw `String` through its public interface.
+- A secret written through the administrative path survives gateway restart and is retrieved by logical reference.
+- The plaintext secret does not appear in the storage file, logs, errors, or metadata output.
+- Wrong keys, modified ciphertext, truncated files, and replayed old records fail closed.
+- Concurrent access and interrupted-write tests preserve a valid previous or new state, never a partial state.
+- The runtime provider returns `SecretMaterial`, not a raw `String` through its public interface.
+- The conformance suite can be reused unchanged by an external provider adapter.
 
 Primary file ownership:
 
-- `/crates/acf-bitwarden/`
-- Bitwarden-specific integration tests and documentation
+- `/crates/acf-provider-local/`
+- Provider registry and conformance tests in `/crates/acf-secrets/`
+- `/docs/providers/encrypted-local.md`
 
 ### WP-05 — Declarative connector runtime and restricted HTTP connector
 
@@ -361,7 +371,7 @@ resources:
     provider: example-api
     credentials:
       read:
-        secret_ref: bitwarden://example-api/production/read
+        secret_ref: secret://production/example-api/read
 ```
 
 Provider profiles and resource registrations contain secret references, never secret values. Agents provide only the logical action, logical resource, and schema-validated parameters.
@@ -510,7 +520,7 @@ acf_verify_action_result
 
 Required invariants:
 
-- Skills contain no provider token, Bitwarden credential, private key, or production secret value.
+- Skills contain no provider token, secret-provider bootstrap credential, private key, storage-encryption key, or production secret value.
 - Skills never instruct an agent to use direct provider APIs, arbitrary `curl` commands, or shell-based credential injection.
 - MCP tool inputs do not allow agents to select secret references or arbitrary authorization headers.
 - MCP identity headers are not trusted unless produced by an authenticated, trusted intermediary.
@@ -536,7 +546,7 @@ Primary file ownership:
 flowchart TD
     W0[WP-00 Workspace and CI] --> W1[WP-01 Protocol and secrets]
     W1 --> W2[WP-02 Policy and dev identity]
-    W1 --> W4[WP-04 Bitwarden adapter]
+    W1 --> W4[WP-04 Encrypted local provider]
     W1 --> W6[WP-06 Audit]
     W2 --> W3[WP-03 Gateway vertical slice]
     W2 --> W5[WP-05 HTTP connector]
@@ -570,10 +580,10 @@ After WP-00 and the minimum WP-01 interfaces merge, work can be distributed as f
 | Agent lane | Primary work | Avoid editing |
 | --- | --- | --- |
 | Core | WP-01 and protocol review | Provider and binary implementations |
-| Authorization | WP-02 and WP-08 | Bitwarden and connectors |
+| Authorization | WP-02 and WP-08 | Secret providers and connectors |
 | Provider | WP-04 | Core protocol except through review requests |
 | Gateway | WP-03 and WP-07 integration | Provider internals |
-| Connector | WP-05 | Gateway lifecycle and Bitwarden internals |
+| Connector | WP-05 | Gateway lifecycle and secret-provider internals |
 | Security/observability | WP-06 and cross-cutting negative tests | Feature behavior without coordination |
 | Agent integration | WP-09 skills, MCP adapter, and workflow evals | Gateway authorization and provider internals |
 
@@ -665,7 +675,7 @@ Deferred work must not be pulled into an early work package unless it blocks the
 - [ ] Static policy is deny by default.
 - [ ] Development identity is isolated from production configuration.
 - [ ] Agent-to-gateway local vertical slice works.
-- [ ] Bitwarden integration retrieves a test secret.
+- [ ] Encrypted local provider persists and retrieves a test secret without plaintext disk storage.
 - [ ] HTTP connector enforces destination and request constraints.
 - [ ] mTLS maps the client certificate to an identity context.
 - [ ] Signed task capabilities and replay protection are active.
@@ -678,7 +688,7 @@ Deferred work must not be pulled into an early work package unless it blocks the
 
 1. Open and merge WP-00: Cargo workspace and CI.
 2. Assign an owner to WP-01 before other crates define competing interfaces.
-3. Prepare a dedicated Bitwarden development organization/project and one non-production test secret.
+3. Define the encrypted local storage format and prepare one non-production canary secret.
 4. Prepare the local upstream fixture and canary token.
 5. After WP-01 merges, start WP-02, WP-04, and WP-06 in parallel.
 

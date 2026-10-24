@@ -33,7 +33,7 @@ Tailnet
 
 The gateway should listen only on its Tailscale interface or use an embedded tailnet endpoint. It should not expose its Agent API through a public network interface.
 
-Development and production should use separate gateway identities, access rules, and Bitwarden machine accounts.
+Development and production should use separate gateway identities, access rules, and secret-provider namespaces or access identities.
 
 ## Network grants
 
@@ -99,7 +99,7 @@ Application capabilities are only one authorization layer. ACF must still valida
 - Use tag-owned workload identities instead of personal identities.
 - Assign each VPS or workload a unique ACF agent identity.
 - Restrict each tag to the minimum gateway and port.
-- Avoid storing Bitwarden access tokens on the VPS.
+- Avoid storing remote secret-provider bootstrap credentials on the VPS.
 
 ### Remote or unmanaged terminals
 
@@ -119,9 +119,9 @@ If a device is suspected of compromise:
 
 1. Quarantine or remove the device from the tailnet.
 2. Revoke active ACF sessions and task capabilities.
-3. Revoke the affected gateway's Bitwarden access token if the gateway may be compromised.
+3. Revoke or rotate the affected gateway's provider credential or storage key if the gateway may be compromised.
 4. Rotate downstream credentials used during the exposure window.
-5. Correlate ACF, Bitwarden, Tailscale, and downstream audit events.
+5. Correlate ACF, secret-provider, Tailscale, and downstream audit events.
 
 Identity resolution failures must fail closed. Cached identity or capability data should have a short, bounded lifetime, and production secret use should not silently fall back to unauthenticated connectivity.
 

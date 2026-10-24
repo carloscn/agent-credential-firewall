@@ -12,14 +12,14 @@ Its central security property is:
 
 > An agent should be able to perform an authorized action without receiving a reusable long-lived credential whenever possible.
 
-ACF sits between agents and credential-backed services. It authenticates the calling user, device, workload, and task; evaluates policy; obtains the required secret from Bitwarden Secrets Manager; and either performs the requested action or grants a tightly constrained, short-lived lease.
+ACF sits between agents and credential-backed services. It authenticates the calling user, device, workload, and task; evaluates policy; obtains the required secret through a configured `SecretProvider`; and either performs the requested action or grants a tightly constrained, short-lived lease.
 
 The initial deployment model assumes:
 
 - Agents run on developer endpoints, trusted servers, VPS instances, and remote terminals.
 - Devices communicate with gateways over a mutually authenticated, encrypted transport.
-- Secrets are stored in Bitwarden Secrets Manager.
-- Bitwarden Secrets Manager SDK is used by gateways to retrieve secrets.
+- Secrets are stored in one or more configured secret providers.
+- Gateways access providers only through the vendor-neutral `SecretProvider` interface.
 - The gateway is deployed on dedicated, hardened infrastructure separate from agent workloads.
 
 ## 2. Problem statement
@@ -41,7 +41,7 @@ Moving these tokens into a secrets manager improves storage, but does not solve 
 
 ACF should:
 
-1. Keep Bitwarden access tokens away from agent hosts.
+1. Keep secret-provider bootstrap credentials and downstream tokens away from agent hosts.
 2. Prefer proxying authorized actions over returning secret values.
 3. Bind authorization to user, device, workload, agent, task, resource, action, and time.
 4. Support developer endpoints, unattended VPS workloads, and remote terminals.
@@ -56,7 +56,7 @@ ACF should:
 
 The first version will not:
 
-- Replace Bitwarden Secrets Manager.
+- Replace an organization's existing secret-management or key-management infrastructure.
 - Replace an organization's identity provider or network access control system.
 - Guarantee safety after a gateway host is fully compromised.
 - Turn static third-party bearer tokens into cryptographically non-exportable credentials.
@@ -69,7 +69,7 @@ The first version will not:
 
 ### 5.1 Assets
 
-- Bitwarden machine-account access tokens.
+- Secret-provider bootstrap credentials and encryption keys.
 - Downstream API tokens, database credentials, certificates, and signing keys.
 - Authorization policy and task capability definitions.
 - Audit records and identity mappings.
@@ -87,7 +87,7 @@ The first version will not:
 
 ### 5.3 Trust assumptions
 
-- Bitwarden and configured identity providers behave according to their documented security models.
+- Configured secret and identity providers behave according to their documented security models.
 - Gateway hosts are more trusted and more tightly controlled than agent hosts.
 - Connection and device identity do not prove that an endpoint is uncompromised.
 - Downstream APIs correctly enforce the credentials and requests presented to them.
@@ -104,8 +104,8 @@ flowchart LR
     D -->|Authenticated encrypted transport| G[Credential Gateway]
     G --> I[Identity and Posture Provider]
     G --> P[Policy Engine]
-    G --> B[Bitwarden Provider]
-    B --> BW[Bitwarden Secrets Manager]
+    G --> SP[SecretProvider Interface]
+    SP --> SS[Configured Secret Stores]
     G --> X[Action Connectors]
     X --> GH[GitHub]
     X --> C[Cloud APIs]
@@ -130,7 +130,7 @@ Local agent daemon
         ↓  authenticated encrypted connection
 Credential gateway
         ↓
-Bitwarden and approved downstream services
+Configured secret stores and approved downstream services
 ```
 
 Agents and the content they process are treated as potentially hostile. The gateway is a high-value security boundary and must not execute agent-provided code.
@@ -162,7 +162,7 @@ The layers have distinct responsibilities:
 - **The local daemon** attaches trusted local process, agent, device, and task context that the model cannot choose freely.
 - **The gateway** authenticates, authorizes, retrieves credentials, executes connectors, and audits outcomes.
 
-Skills are not part of the authorization boundary. A malicious, modified, or ignored skill must not enable an operation that the gateway would otherwise deny. Skills and adapters must never contain provider tokens, Bitwarden access tokens, private keys, or production secret values.
+Skills are not part of the authorization boundary. A malicious, modified, or ignored skill must not enable an operation that the gateway would otherwise deny. Skills and adapters must never contain provider tokens, secret-provider bootstrap credentials, private keys, or production secret values.
 
 ## 7. Core components
 
@@ -201,7 +201,7 @@ Responsibilities:
 - Remove credentials from logs and error reports.
 - Optionally supervise processes receiving temporary credential leases.
 
-The daemon is not trusted with a Bitwarden machine-account token.
+The daemon is not trusted with a secret-provider bootstrap credential or storage-encryption key.
 
 ### 7.3 Credential Gateway
 
@@ -276,14 +276,18 @@ Example decision input:
 
 The gateway should isolate secret-manager-specific behavior behind an interface:
 
-```go
-type SecretProvider interface {
-    Get(ctx context.Context, ref SecretRef) (SecretMaterial, error)
-    ListMetadata(ctx context.Context, scope Scope) ([]SecretMetadata, error)
+```rust
+#[async_trait]
+pub trait SecretProvider: Send + Sync {
+    async fn get(&self, reference: &SecretRef)
+        -> Result<SecretMaterial, SecretError>;
+
+    async fn list_metadata(&self, scope: &SecretScope)
+        -> Result<Vec<SecretMetadata>, SecretError>;
 }
 ```
 
-The initial implementation uses Bitwarden Secrets Manager SDK. Future providers could include HashiCorp Vault, cloud secret managers, or a local development provider.
+The core implementation is provider-neutral. Initial implementations should include an in-memory test provider and an encrypted local provider. External adapters may integrate with third-party secret managers without changing gateway, policy, connector, or agent contracts.
 
 Secret values must be represented by types that discourage logging, serialization, and accidental string formatting.
 
@@ -387,16 +391,16 @@ acf-example-com-dns-write
   Resource:   Specific zone / example.com
 ```
 
-Read and write credentials are separated so read-only requests do not expose a write-capable token inside the gateway process. The tokens are stored in Bitwarden, for example:
+Read and write credentials are separated so read-only requests do not expose a write-capable token inside the gateway process. The tokens are stored through a configured secret provider, for example:
 
 ```text
-Project: acf-cloudflare-production
+Provider namespace: production/cloudflare
 
 cloudflare/example.com/dns-read
 cloudflare/example.com/dns-write
 ```
 
-Only the appropriate gateway machine account can read this project. The agent has no direct Bitwarden access.
+Only the appropriate gateway security identity can resolve these references. The agent has no direct provider access.
 
 Cloudflare documents `DNS Read` and `DNS Write` as zone permissions and recommends scoped API tokens instead of the legacy global API key. See the [Cloudflare API token permissions](https://developers.cloudflare.com/fundamentals/api/reference/permissions/).
 
@@ -445,7 +449,7 @@ The list and create actions map to Cloudflare's documented `GET /zones/{zone_id}
 
 #### 7.8.3 Resource registration
 
-The administrator registers the actual zone and binds credential slots to logical Bitwarden references:
+The administrator registers the actual zone and binds credential slots to logical provider-neutral secret references:
 
 ```yaml
 resources:
@@ -456,9 +460,9 @@ resources:
 
     credentials:
       read:
-        secret_ref: bitwarden://cloudflare/example.com/dns-read
+        secret_ref: secret://production/cloudflare/example.com/dns-read
       write:
-        secret_ref: bitwarden://cloudflare/example.com/dns-write
+        secret_ref: secret://production/cloudflare/example.com/dns-write
 
     constraints:
       allowed_record_types: [A, AAAA, CNAME, TXT]
@@ -471,7 +475,7 @@ resources:
       max_changes_per_task: 5
 ```
 
-The URI beginning with `bitwarden://` is an ACF logical reference, not a secret value and not necessarily a native Bitwarden URI format.
+The URI beginning with `secret://` is an ACF logical reference, not a secret value. Provider configuration maps its namespace to a concrete local or remote secret store.
 
 #### 7.8.4 Query interaction
 
@@ -511,7 +515,7 @@ The gateway:
 1. Verifies connection identity and the task capability.
 2. Confirms that the action, zone, name, and record type are allowed.
 3. Resolves the resource's `read` credential slot.
-4. Retrieves the read token from Bitwarden.
+4. Retrieves the read token through the configured `SecretProvider`.
 5. Injects the bearer token into the fixed Cloudflare request.
 6. Filters the provider response.
 7. Returns DNS data without returning the token.
@@ -566,17 +570,17 @@ After approval, the gateway revalidates the complete request, resolves the `writ
 
 #### 7.8.6 Audit and rotation
 
-The audit event records identity, task, action, logical resource, approval, logical secret reference, requested DNS change, provider result, and timestamps. It never records the bearer token, authorization header, Bitwarden access token, or private keys.
+The audit event records identity, task, action, logical resource, approval, logical secret reference, requested DNS change, provider result, and timestamps. It never records the bearer token, authorization header, provider bootstrap credential, storage-encryption key, or private keys.
 
 Token rotation is an administrative workflow:
 
 1. Create a new scoped Cloudflare token.
 2. Verify that the token is active through Cloudflare's token verification endpoint.
-3. Update the corresponding Bitwarden secret.
+3. Update the corresponding secret through the configured provider's administrative path.
 4. Validate gateway use of the new token.
 5. Revoke the old Cloudflare token.
 
-For higher assurance, read and write credentials may be placed in separate Bitwarden projects and consumed by separate gateway security domains. This limits a compromised read path from becoming a DNS mutation path.
+For higher assurance, read and write credentials may be placed in separate provider namespaces or stores and consumed by separate gateway security domains. This limits a compromised read path from becoming a DNS mutation path.
 
 This example illustrates the general ACF model: every service and resource is explicitly registered, but ordinary token-based REST services are added through reviewed profiles and configuration rather than one-off gateway code.
 
@@ -668,7 +672,7 @@ sequenceDiagram
     participant G as Gateway
     participant I as Identity Provider
     participant P as Policy Engine
-    participant B as Bitwarden
+    participant SP as Secret Provider
     participant X as Downstream API
 
     A->>D: Request logical action
@@ -677,8 +681,8 @@ sequenceDiagram
     I-->>G: User/workload, device, labels, posture
     G->>P: Evaluate full context
     P-->>G: Allow with constraints
-    G->>B: Retrieve referenced secret
-    B-->>G: Secret material
+    G->>SP: Retrieve referenced secret
+    SP-->>G: Secret material
     G->>X: Validated request + credential
     X-->>G: Response
     G-->>D: Filtered result
@@ -707,12 +711,12 @@ Gateways should:
 - Be separate from hosts executing agents or user-provided code.
 - Have no public inbound listener.
 - Listen only on a private interface or authenticated service endpoint.
-- Permit outbound access only to Bitwarden, audit infrastructure, and approved downstream services.
-- Use separate Bitwarden machine accounts or access tokens per gateway instance and environment.
+- Permit outbound access only to configured remote providers, audit infrastructure, and approved downstream services.
+- Use separate provider identities, namespaces, or bootstrap credentials per gateway security domain and environment.
 - Keep secret values in memory for the shortest practical duration.
 - Be deployed redundantly for production availability.
 
-At minimum, development and production must use separate gateways and Bitwarden machine accounts.
+At minimum, development and production must use separate gateways and provider namespaces or access identities.
 
 ### 11.2 Endpoint classes
 
@@ -728,7 +732,7 @@ At minimum, development and production must use separate gateways and Bitwarden 
 - Use tagged workload/device identity instead of personal identity.
 - Give each VPS or workload a unique agent identity.
 - Restrict actions and resources per workload.
-- Avoid storing Bitwarden access tokens on the VPS.
+- Avoid storing remote-provider bootstrap credentials on agent VPS instances.
 
 #### Remote or unmanaged terminals
 
@@ -736,21 +740,58 @@ At minimum, development and production must use separate gateways and Bitwarden 
 - Allow only proxy actions or remote execution on trusted infrastructure.
 - Use very short task capabilities and approval for sensitive operations.
 
-## 12. Bitwarden integration
+## 12. Secret provider integration
 
-Each gateway authenticates as a narrowly scoped Bitwarden machine account. Projects should align with security boundaries such as environment, region, or service.
+ACF resolves a logical `SecretRef` through a configured provider registry:
 
-Example:
+```yaml
+secret_providers:
+  production:
+    type: encrypted-local
+    config:
+      path: /var/lib/acf/secrets.acf
+      key_source: systemd-credential
 
-```text
-acf-dev              → project: agent-dev
-acf-prod-eu-01       → project: agent-prod-eu
-acf-prod-eu-02       → project: agent-prod-eu
+  enterprise:
+    type: external
+    adapter: organization-vault
+    config:
+      server: https://vault.example.com
 ```
 
-Gateway access tokens are bootstrap credentials and must be protected separately from agent workloads. Preferred storage options include TPM- or KMS-protected service credentials and operating-system credential facilities. They must not be committed to source control, built into images, or passed in process arguments.
+A resource refers only to a logical name:
 
-Because an authenticated Bitwarden session may remain usable for a period after access-token revocation, gateway session termination and network isolation must be separate incident-response controls.
+```text
+secret://production/cloudflare/example.com/dns-write
+```
+
+The provider registry maps `production` to an implementation. Agent requests and connector profiles cannot choose or override that mapping.
+
+### 12.1 Provider categories
+
+- **In-memory provider** — deterministic tests and local development; never production persistence.
+- **Encrypted local provider** — encrypted storage on gateway-controlled disk for self-hosted deployments.
+- **External provider adapter** — an integration with an existing secret manager or HSM-backed service.
+
+All providers must implement the same conformance suite covering retrieval, metadata handling, redaction, error mapping, namespace isolation, and cancellation.
+
+### 12.2 Encrypted local provider
+
+The encrypted local provider stores ciphertext in a gateway-controlled directory, such as `/var/lib/acf/`. It must use authenticated encryption through a reviewed cryptographic library and a versioned storage format.
+
+The key-encryption key must not be stored next to the encrypted data file. Supported key sources may include:
+
+- TPM- or hardware-backed unsealing.
+- A cloud KMS or HSM.
+- An operating-system credential facility.
+- A root-only file mounted from a separately protected volume.
+- Interactive operator unlock for small or offline deployments.
+
+If ciphertext and its effective decryption key are stored on the same VPS disk under the same protection boundary, encryption protects backups and some disk-theft scenarios but does not protect against full host compromise.
+
+The provider should support atomic writes, file locking, rollback-safe versioning, explicit backup procedures, strict filesystem permissions, bounded plaintext lifetime, and zeroization where reliable. It must never expose a general-purpose decryption endpoint to agents.
+
+Detailed local-storage requirements live in [Encrypted local provider](providers/encrypted-local.md). External integrations belong in separate provider-specific documents and adapters.
 
 ## 13. Audit and detection
 
@@ -795,10 +836,10 @@ When a device or gateway is suspected of compromise:
 1. Remove or quarantine the device through the configured network and identity controls.
 2. Revoke active ACF task capabilities and sessions.
 3. Stop the affected gateway instance when applicable.
-4. Revoke its Bitwarden access token.
+4. Revoke or rotate its provider bootstrap credential or storage key when applicable.
 5. Identify downstream credentials used during the exposure window.
 6. Rotate affected credentials.
-7. Correlate ACF audit events with Bitwarden and downstream service logs.
+7. Correlate ACF audit events with secret-provider and downstream service logs.
 8. Restore the node from a trusted image before re-enrollment.
 
 ## 16. Initial API sketch
@@ -843,7 +884,7 @@ The security-sensitive data plane will be implemented in Rust. This includes:
 
 - Credential Gateway.
 - Local Agent Daemon.
-- Bitwarden Secrets Manager adapter.
+- Secret-provider adapters, including the encrypted local provider.
 - Identity and policy enforcement interfaces.
 - Action connectors.
 - Task-capability validation and audit event generation.
@@ -854,7 +895,7 @@ The management control plane and web interface are not required to use Rust. The
 
 Rust is selected because it:
 
-- Can consume the native Rust Bitwarden Secrets Manager SDK without an additional language binding or FFI boundary.
+- Supports memory-safe provider and connector implementations behind strict type boundaries.
 - Provides memory and type safety appropriate for a long-running, high-privilege gateway.
 - Produces self-contained binaries suitable for endpoints and VPS deployments.
 - Supports a shared protocol and security-type implementation across the gateway and local daemon.
@@ -877,7 +918,7 @@ The initial implementation should prefer:
 | CLI | Clap |
 | Secret-bearing values | `secrecy` and `zeroize` |
 | Structured telemetry | `tracing` |
-| Bitwarden integration | Native Rust Secrets Manager SDK |
+| Secret providers | Trait-based adapters and encrypted local provider |
 
 The first protocol should use HTTP/2 with JSON over TLS rather than a custom transport. gRPC may be added later if measurements demonstrate a need.
 
@@ -893,7 +934,7 @@ crates/
 ├── acf-identity/         # Pluggable connection identity providers
 ├── acf-policy/           # Authorization decisions
 ├── acf-secrets/          # SecretProvider traits and protected types
-├── acf-bitwarden/        # Bitwarden SDK adapter
+├── acf-provider-local/   # Encrypted local secret provider
 ├── acf-connectors/       # Downstream action connectors
 └── acf-audit/            # Structured audit events
 
@@ -906,6 +947,9 @@ integrations/
         ├── acf-actions/
         ├── acf-cloudflare-dns/
         └── acf-connector-authoring/
+
+providers/
+└── README.md             # Optional external-provider adapter contract
 ```
 
 Shared crates must preserve dependency direction: provider and connector implementations may depend on core interfaces, but core policy and protocol crates must not depend on a particular provider. Skills and MCP adapters depend on the public action contract; the gateway must never depend on skill behavior for security decisions.
@@ -928,7 +972,7 @@ Rust code that handles secret material must:
 
 - Gateway service reachable only through a private, authenticated interface.
 - Pluggable caller and device identity resolution.
-- Bitwarden Secrets Manager provider.
+- Provider-neutral secret contract and encrypted local provider.
 - Static policy configuration with deny-by-default behavior.
 - Generic HTTP bearer-token connector with strict allowlists.
 - Structured audit events with secret redaction tests.
@@ -960,7 +1004,7 @@ Rust code that handles secret material must:
 - How should connectors filter potentially sensitive downstream responses?
 - Which secret types can be replaced by genuinely short-lived credentials?
 - How should gateway bootstrap credentials be provisioned in self-hosted deployments?
-- What is the acceptable behavior during Bitwarden or identity-provider outages?
+- What is the acceptable behavior during secret-provider or identity-provider outages?
 - Should tenants receive dedicated gateway instances or isolated logical partitions?
 
 ## 20. Security principles
