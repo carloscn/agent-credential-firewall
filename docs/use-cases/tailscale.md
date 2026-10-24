@@ -83,7 +83,9 @@ Conceptual example:
 
 ACF can resolve the caller and its capabilities using LocalAPI or an embedded tailnet integration. The gateway must validate the actual connection identity; it must not trust identity headers supplied directly by an agent.
 
-Application capabilities are only one authorization layer. ACF must still validate the signed task capability, evaluate gateway policy, and enforce the exact downstream request in its connector.
+Application capabilities are only one authorization layer. They feed the `DeviceIdentity` term of ACF's effective-permission intersection, so they can narrow what a node may do but never widen it. ACF still validates the certificate-bound task capability, evaluates gateway policy and resource constraints, and enforces the exact downstream request in its connector.
+
+Tailscale identity establishes which node is connecting. The daemon's mTLS certificate binds that connection to the task capability. When both are used, the gateway requires them to name the same device.
 
 ## Device classes
 
@@ -104,7 +106,7 @@ Application capabilities are only one authorization layer. ACF must still valida
 ### Remote or unmanaged terminals
 
 - Do not return raw production secrets.
-- Permit only proxy actions or remote execution on trusted infrastructure.
+- Permit only semantic proxy actions executed by the gateway.
 - Use short task capabilities and approval for sensitive operations.
 
 ## Tailnet Lock
@@ -118,10 +120,11 @@ It does not make a compromised, already authorized endpoint trustworthy. ACF sho
 If a device is suspected of compromise:
 
 1. Quarantine or remove the device from the tailnet.
-2. Revoke active ACF sessions and task capabilities.
+2. Revoke active ACF sessions and task capabilities through the Capability Authority.
 3. Revoke or rotate the affected gateway's provider credential or storage key if the gateway may be compromised.
 4. Rotate downstream credentials used during the exposure window.
-5. Correlate ACF, secret-provider, Tailscale, and downstream audit events.
+5. Reconcile any mutation left in the `unknown` operation state.
+6. Correlate ACF, secret-provider, Tailscale, and downstream audit events.
 
 Identity resolution failures must fail closed. Cached identity or capability data should have a short, bounded lifetime, and production secret use should not silently fall back to unauthenticated connectivity.
 

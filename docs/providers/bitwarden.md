@@ -44,11 +44,15 @@ Agents and connector profiles never receive the Bitwarden secret ID or machine-a
 2. The adapter maps the logical path to a configured Bitwarden secret ID.
 3. The adapter authenticates with a narrowly scoped machine account.
 4. The Bitwarden SDK retrieves and decrypts the secret locally.
-5. The adapter converts it immediately into ACF `SecretMaterial`.
-6. The connector uses the material without exposing it to the agent.
+5. The adapter converts it immediately into a `ResolvedSecret` with `attested_binding: None`.
+6. The gateway enforces the use binding from the signed Config Registry, and the connector uses the material without exposing it to the agent.
 7. ACF records only the logical reference and provider outcome.
 
 The core adapter should use the native Rust SDK when its supported API is compatible with the required retrieval operations. SDK-specific values and errors must remain inside the adapter boundary.
+
+Bitwarden does not store ACF use bindings as authenticated metadata. This adapter therefore never attests a binding, and the registry binding is the only binding check before injection. The runtime adapter implements only `SecretProvider::get()`. Enumeration and mutation happen through Bitwarden's own administrative tooling, not through ACF's `SecretAdmin` trait.
+
+This adapter is planned for M3.
 
 ## 4. Security boundaries
 
@@ -68,7 +72,7 @@ The adapter must pass the same provider conformance suite as the encrypted local
 
 - Exact logical-reference mapping.
 - Namespace isolation.
-- Protected `SecretMaterial` return type.
+- Protected `ResolvedSecret` return type with `attested_binding: None`.
 - Cancellation and timeout handling.
 - Redacted authentication and retrieval errors.
 - Missing, revoked, expired, and unavailable states.

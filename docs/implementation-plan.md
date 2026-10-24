@@ -6,41 +6,47 @@ Last updated: 2026-10-24
 
 ## 1. Purpose
 
-This document is the execution blueprint for the first working version of Agent Credential Firewall (ACF). It turns the [system design](design.md) into independently assignable work packages with explicit dependencies and acceptance criteria.
+This document is the execution blueprint for Agent Credential Firewall (ACF). It turns the [system design](design.md) into work packages that can be assigned independently, each with explicit dependencies and acceptance criteria.
 
-The first milestone must prove one security property end to end:
+The production-shaped milestones must prove these properties end to end:
 
-> An agent can perform an authorized credential-backed action without receiving the reusable credential used for that action.
+> An agent can perform an authorized semantic action without receiving the reusable credential used for that action.
 
-The implementation should remain deliberately small until this property is demonstrated and tested.
+> A trusted authority issues the task grant and binds it to the local daemon's identity. The agent cannot broaden it or carry it to another host.
 
-## 2. First demonstrable outcome
+> A mutation runs only after a human approves its exact, gateway-rendered content, and an ambiguous outcome is never retried automatically.
 
-The initial demo consists of four processes or components:
+Each milestone builds only on contracts that earlier milestones have verified.
+
+## 2. Milestones
 
 ```text
-acf-agent
-    ↓ authenticated action request
-acf-gateway
-    ↓ policy decision
-SecretProvider
-    ↓ secret material
-HTTP Connector
-    ↓ credential-injected request
-Local Test Upstream
+M0  Non-production semantic-action skeleton
+ ↓
+M1  Secure read path
+ ↓
+M2  Approved mutation path
+ ↓
+M3  Extensions: Skills/MCP, Cedar, HA, more providers and connectors
 ```
+
+### 2.1 M0 — non-production development skeleton
 
 The operator runs:
 
 ```bash
 acf-agent action execute \
-  --action http.request \
-  --resource demo-api \
-  --method GET \
-  --path /profile
+  --action example.profile.get \
+  --resource example-api:development
 ```
 
-The expected response contains business data only:
+The request crosses the same semantic API shape intended for production:
+
+```http
+POST /v1/actions/execute
+```
+
+The expected response contains only allowlisted business data:
 
 ```json
 {
@@ -49,102 +55,146 @@ The expected response contains business data only:
 }
 ```
 
-The agent must never receive the upstream bearer token or the gateway's secret-provider credential.
+The agent cannot select any of the following:
+
+- An HTTP method, path, or absolute URL.
+- A credential slot or authentication strategy.
+- A secret reference.
+
+M0 uses an explicitly marked development identity, the single in-memory provider, and the `development` deployment profile. It makes no production-security claim.
+
+### 2.2 M1 — secure read path
+
+M1 adds:
+
+- A local daemon under a separate service identity, with a non-exportable device key and a peer-credential Unix socket.
+- mTLS device identity.
+- A Capability Authority issuing certificate-bound task capabilities, authorized by signed job definitions or by trusted scheduler policy.
+- Request-ID replay protection, revocation, quotas, and rate limiting.
+- Signed configuration bundles, secret use bindings, and `production` profile startup validation.
+- A per-record encrypted local provider with an optional rollback anchor.
+- Audit with external checkpoints or a remote append-only sink.
+
+Human WebAuthn confirmation of task scope arrives in M2, together with the Approval Service.
+
+### 2.3 M2 — approved mutation path
+
+M2 adds:
+
+- A WebAuthn-protected Approval Service on its own origin, also used for human task confirmation.
+- Gateway-rendered approval objects, RFC 8785 digests, and one-time signed receipts.
+- A durable operation journal, idempotency keys, and reconciliation after ambiguous downstream outcomes.
+- Cloudflare DNS list and create through a declarative profile and DNS domain types.
+
+### 2.4 M3 — extensions
+
+M3 adds:
+
+- Agent Skills and the MCP adapter.
+- Cedar policy backend.
+- High-availability gateways with shared, strongly consistent state.
+- Additional secret providers and connectors.
+- Posture and detection features.
 
 ## 3. Milestone acceptance criteria
 
-Milestone 1 is complete only when all of the following are true:
+### 3.1 M0
 
-- `acf-agent` can request one logical HTTP action from `acf-gateway`.
-- The gateway authenticates a development identity.
-- A deny-by-default policy authorizes an explicit action and resource.
-- The gateway retrieves a credential through the `SecretProvider` interface.
-- The HTTP connector injects the credential into an allowlisted upstream request.
-- The agent receives a filtered upstream response without the credential.
-- Unknown resources, methods, paths, and destinations are rejected.
-- Secret values do not appear in application logs, audit events, errors, or HTTP responses.
-- No plaintext secret is persisted to disk by ACF.
-- Unit, integration, and negative security tests pass in CI.
-- The same end-to-end test can run with the in-memory provider and the encrypted local provider.
+- `example.profile.get` works through `POST /v1/actions/execute`.
+- Policy is deny by default and authorizes an exact semantic action/resource pair.
+- Authorization happens before secret retrieval.
+- The connector injects a canary credential into a fixed upstream request.
+- `{params.*}` values cannot override `{resource.*}` bindings.
+- The response contains only profile-allowlisted fields.
+- Secret values do not appear in logs, audit events, errors, or protocol responses.
+- Unknown actions, resources, parameters, destinations, and response fields are rejected.
+- No public `http.request`, arbitrary method/path, absolute URL, or secret-value endpoint exists.
+
+### 3.2 M1
+
+- The Capability Authority is deployed as an explicit control-plane component with its own signing key.
+- Task scope comes from a signed job definition or trusted scheduler policy. Agent input alone cannot authorize it.
+- A capability is reusable within its TTL, bound to the daemon certificate, revocable, and constrained by action, resource, parameters, and quotas.
+- Reusing a `requestId` is denied, but the capability itself is not single-use.
+- The agent process receives only an opaque task handle and cannot read the daemon key in the documented production topology.
+- The encrypted provider decrypts only the requested record and never loads an unrelated write credential for a read action.
+- A secret is never released to a connector or origin outside its use binding.
+- Production startup rejects development identity, insecure key sources, the in-memory provider, unsigned bundles, and an encrypted store that has neither a rollback anchor nor an explicit acknowledgement.
+- Rate limits, revocation, and externally anchored audit are active.
+
+### 3.3 M2
+
+- `acf_request_approval` and gated `acf_execute_action` calls can create and poll an approval, but cannot approve one.
+- The human sees the gateway-rendered normalized change and authenticates through WebAuthn on the Approval Service origin.
+- An approval receipt is bound to one RFC 8785 canonical digest and is consumed once.
+- Changing any parameter, the profile digest, the policy version, or a precondition invalidates the approval.
+- Mutations are never retried automatically after an ambiguous timeout.
+- Operation status exposes `prepared`, `awaiting_approval`, `approved`, `rejected`, `expired`, `sent`, `confirmed`, `failed`, or `unknown`, and never exposes credentials.
+- Cloudflare DNS constraints are evaluated after DNS normalization.
+
+### 3.4 M3
+
+- Skills and MCP remain workflow-only and cannot bypass policy, approval, use bindings, or connector validation.
+- Gateways deployed for high availability share replay, receipt, quota, revocation, and journal state with strong consistency.
 
 ## 4. Delivery strategy
 
-Implementation proceeds in three stages:
+Static typed YAML policy is sufficient through M2. Cedar is the preferred later policy engine, but adding a general-purpose policy language must not delay the core trust, storage, approval, and connector invariants.
 
-```text
-Stage A: Safe local vertical slice
-        ↓
-Stage B: Encrypted persistent provider and authenticated transport
-        ↓
-Stage C: Production hardening
-```
-
-Do not begin with a control-plane UI, multi-tenancy, high availability, or a general-purpose policy language. Those features must build on a verified data plane.
+Do not begin with a management UI, multi-tenancy, or a configuration database. Those features build on a verified data plane.
 
 ## 5. Cargo workspace
 
-The target workspace is:
-
 ```text
 crates/
-├── acf-gateway/          # Gateway binary and request lifecycle
+├── acf-gateway/          # Data-plane request lifecycle
+├── acf-control-plane/    # Capability Authority and Approval Service
 ├── acf-agent/            # Endpoint/VPS daemon and CLI
-├── acf-protocol/         # API models and task capabilities
-├── acf-identity/         # Connection identity providers
-├── acf-policy/           # Authorization inputs and decisions
-├── acf-secrets/          # SecretProvider trait and protected types
+├── acf-protocol/         # API, task, approval, and operation models
+├── acf-identity/         # Connection and local peer identity
+├── acf-policy/           # Authorization and constraint composition
+├── acf-config/           # Profile/resource/secret registration, validation, pinning
+├── acf-state/            # Replay, revocation, quotas, receipts, operation journal
+├── acf-secrets/          # Runtime/admin provider traits, protected types, in-memory provider
 ├── acf-provider-local/   # Encrypted local provider
-├── acf-connectors/       # Downstream action connectors
-└── acf-audit/            # Structured, redacted audit events
+├── acf-connectors/       # Semantic action connectors and domain types
+└── acf-audit/            # Redacted, tamper-evident audit events
 
 integrations/
-├── mcp/                  # Thin MCP / action API adapter
-└── agent-plugin/         # Portable agent integration package
-    ├── plugin.json       # Plugin metadata
-    ├── mcp.json          # MCP server declaration
+├── mcp/
+└── agent-plugin/
+    ├── plugin.json
+    ├── mcp.json
     └── skills/
         ├── acf-actions/
         ├── acf-cloudflare-dns/
         └── acf-connector-authoring/
-
-providers/
-└── README.md             # Optional external-provider adapter contract
-```
-
-Dependency direction:
-
-```text
-acf-protocol     acf-policy     acf-secrets     acf-audit
-      ↑               ↑              ↑              ↑
-      └──────────── acf-gateway ──────┴──────────────┘
-                       ↑
-              provider and connector implementations
 ```
 
 Rules:
 
-- Core interface crates must not depend on concrete providers.
-- Provider implementations may depend on `acf-secrets`; the reverse is forbidden.
-- Connectors may consume protected secret types but must not expose them through protocol models.
-- API response types must not contain `SecretMaterial`.
-- Binaries should have thin entry points; behavior belongs in testable libraries.
-- Skills and MCP adapters depend on the public action contract; gateway authorization must never depend on skill compliance.
+- Core crates do not depend on concrete secret providers or agent Skills.
+- There is one in-memory provider, in `acf-secrets`, used by tests and the `development` profile. There is no separate mock provider.
+- Protocol response types cannot contain `SecretMaterial`.
+- Runtime secret retrieval exposes only exact-reference `get()`. Enumeration and mutation use the separate `SecretAdmin` trait.
+- The gateway can verify capabilities and receipts, but it never holds the control-plane signing keys.
+- Skills and MCP adapters depend on the action contract. Gateway authorization never depends on skill compliance.
+- Runtime startup validation enforces production security. Compile-time features may remove test code, but they are not the sole security boundary.
 
 ## 6. Work packages
 
-### WP-00 — Repository and CI foundation
+### M0 — non-production skeleton
+
+#### WP-00 — Repository and CI foundation
 
 Dependencies: none
 
 Deliverables:
 
-- Root Cargo workspace.
-- Empty crate structure with documented responsibilities.
-- Pinned Rust toolchain policy.
-- `rustfmt` and strict Clippy configuration.
-- Unit-test and integration-test jobs.
-- Dependency audit and license-policy jobs.
-- Basic contributor commands in the README.
+- Root Cargo workspace and crate skeleton.
+- Pinned Rust toolchain, formatting, strict Clippy, unit and integration jobs.
+- Dependency audit, license policy, and contributor commands.
+- Ownership notes for security-sensitive crates.
 
 Required CI commands:
 
@@ -160,536 +210,513 @@ Acceptance criteria:
 
 - A clean checkout passes all CI jobs.
 - Every crate compiles with a minimal public API.
-- No provider or network implementation is introduced in this package.
+- No network, cryptography, provider, or connector behavior is hidden in WP-00.
 
-Primary file ownership:
-
-- `/Cargo.toml`
-- `/rust-toolchain.toml`
-- `/.github/workflows/`
-- `/deny.toml`
-- Crate manifests only
-
-### WP-01 — Core protocol and protected secret types
+#### WP-01 — Protocol, protected secret types, and in-memory provider
 
 Dependencies: WP-00
 
 Deliverables:
 
-- Stable IDs for requests, tasks, resources, actions, agents, and devices.
-- `ActionRequest` and `ActionResponse` protocol models.
-- `SecretRef`, `SecretMetadata`, and `SecretMaterial` types.
-- `SecretProvider` trait.
-- Error taxonomy that does not embed plaintext secrets.
-- Tests for redaction and serialization boundaries.
+- Stable IDs for requests, tasks, capabilities, approvals, operations, resources, actions, agents, and devices.
+- `ActionRequest`, `ActionResponse`, `TaskCapability`, `ApprovalObject`, and operation-status models.
+- `SecretRef`, `SecretVersion`, `SecretUseBinding`, `SecretMaterial`, `ResolvedSecret`, and redacted error types.
+- Runtime `SecretProvider::get()` and administrative `SecretAdmin` traits.
+- One in-memory provider for tests and development.
+- Runtime provider conformance suite.
 
 Required invariants:
 
-- `SecretMaterial` does not implement `Display`.
-- Plaintext secret types do not derive ordinary `Debug`, `Serialize`, or `Clone`.
-- Protocol response types cannot serialize secret material.
+- `SecretMaterial` does not implement `Display`, `Serialize`, `Clone`, or ordinary `Debug`.
+- Response models cannot contain secret material.
 - Secret-reference formatting is distinguishable from secret-value formatting.
+- Capability `jti`, `requestId`, approval nonce, `idempotencyKey`, and `operationId` are distinct types.
 
 Acceptance criteria:
 
-- Compile-fail or equivalent tests demonstrate that secrets cannot enter response models accidentally.
-- Redaction tests use a canary secret and assert that it is absent from formatted errors and debug output.
+- Compile-fail or equivalent tests prevent secret material from entering responses.
+- Canary values are absent from formatted errors and debug output.
+- The in-memory provider passes the runtime provider conformance suite.
 
-Primary file ownership:
+#### WP-02 — Configuration schema, action contracts, and constraint language
 
-- `/crates/acf-protocol/`
-- `/crates/acf-secrets/`
-
-### WP-02 — Policy engine and development identity
-
-Dependencies: WP-00, protocol identifiers from WP-01
+Dependencies: WP-01
 
 Deliverables:
 
-- `IdentityContext` and `AuthorizationRequest` models.
-- `PolicyEngine` trait.
-- Deny-by-default static policy implementation.
-- Development-only identity provider.
-- Exact action/resource/method/path authorization.
-- Decision reason codes suitable for audit events.
-
-Example policy:
-
-```yaml
-principals:
-  dev-agent:
-    allow:
-      - action: http.request
-        resource: demo-api
-        methods: [GET]
-        paths: [/profile]
-```
+- Versioned schemas for profiles, resources, secret registrations, providers, and deployment profiles.
+- A fail-closed loader that rejects duplicates and unknown fields and validates cross-references.
+- Explicit `{resource.x}` and `{params.x}` template namespaces with single-segment encoding rules.
+- JSON Schema or equivalent structural parameter validation.
+- The typed constraint language: `in`/`not_in`, `range`, `dns_within`/`allow_wildcard`, `glob`, `actions.deny`, and `quotas`.
+- Secret use-binding validation for connector, origin, authentication slot, and environment.
+- Default-deny response-field and header allowlists.
+- Per-field audit classification: `record`, `hash`, or `omit`.
 
 Acceptance criteria:
 
-- Missing policy produces deny.
-- A broader resource rule does not silently match a narrower resource unless explicitly supported.
-- Policy tests cover allow, deny, malformed input, unknown principal, and unknown resource.
-- Development identity is impossible to enable accidentally in a production build or production configuration.
+- Agent parameters cannot override resource bindings.
+- A secret bound to one connector or origin cannot be configured for another.
+- Constraint intersection never broadens either input.
+- Missing response allowlists return no business payload and fail validation.
 
-Primary file ownership:
-
-- `/crates/acf-identity/`
-- `/crates/acf-policy/`
-
-### WP-03 — Gateway and agent vertical slice
+#### WP-03 — Static policy, identity model, and authorization composition
 
 Dependencies: WP-01, WP-02
 
 Deliverables:
 
-- `acf-gateway` binary with health and action endpoints.
-- `acf-agent` CLI capable of sending an action request.
-- Request ID generation and propagation.
-- Request body and response size limits.
-- Timeouts and cancellation.
-- `MockSecretProvider` integration.
-- Local test-upstream fixture.
-
-Initial endpoints:
-
-```http
-GET  /healthz
-POST /v1/actions/execute
-```
-
-Acceptance criteria:
-
-- The local demo completes successfully with a mock provider.
-- Authorization occurs before secret retrieval.
-- Secret retrieval occurs before connector execution and only after allow.
-- Denied requests do not invoke the secret provider.
-- Request cancellation does not leave background credential-bearing work running indefinitely.
-
-Primary file ownership:
-
-- `/crates/acf-gateway/`
-- `/crates/acf-agent/`
-- `/tests/e2e/`, if introduced
-
-### WP-04 — Provider registry and encrypted local provider
-
-Dependencies: WP-00, `SecretProvider` from WP-01
-
-This package may begin in parallel with WP-02 and WP-03 after the `SecretProvider` interface is merged.
-
-Deliverables:
-
-- Provider registry mapping logical `secret://<namespace>/...` references to implementations.
-- Production-shaped `EncryptedLocalSecretProvider` adapter.
-- Versioned, authenticated-encryption storage format.
-- `KeySource` interface for TPM/KMS, operating-system credentials, mounted files, and interactive unlock implementations.
-- Separate administrative commands for initialize, put, rotate, list metadata, backup, and restore.
-- Atomic writes, file locking, rollback-safe updates, and strict filesystem permissions.
-- In-memory provider for deterministic tests.
-- Provider conformance suite reusable by optional external adapters.
-
-Questions the spike must answer:
-
-- Which reviewed authenticated-encryption library and versioned envelope format will be used?
-- How are nonces generated and uniqueness enforced?
-- How are the data-encryption key and key-encryption key separated?
-- How are concurrent readers, rotations, crashes, and partial writes handled?
-- How are backups restored without silently rolling back policy or secret versions?
-- How many plaintext copies are created during retrieval and conversion?
-- How does a provider report locked, unavailable, corrupted, and authentication-failed states without leaking data?
-
-Development bootstrap:
-
-- Tests use generated ephemeral keys and temporary directories.
-- Development may use an explicitly marked insecure key source that is rejected by production configuration validation.
-- Raw encryption keys and secret values must never be accepted as command-line arguments.
-- Fixtures and documentation use canary placeholders, never real credentials.
-
-Acceptance criteria:
-
-- A secret written through the administrative path survives gateway restart and is retrieved by logical reference.
-- The plaintext secret does not appear in the storage file, logs, errors, or metadata output.
-- Wrong keys, modified ciphertext, truncated files, and replayed old records fail closed.
-- Concurrent access and interrupted-write tests preserve a valid previous or new state, never a partial state.
-- The runtime provider returns `SecretMaterial`, not a raw `String` through its public interface.
-- The conformance suite can be reused unchanged by an external provider adapter.
-
-Primary file ownership:
-
-- `/crates/acf-provider-local/`
-- Provider registry and conformance tests in `/crates/acf-secrets/`
-- `/docs/providers/encrypted-local.md`
-
-### WP-05 — Declarative connector runtime and restricted HTTP connector
-
-Dependencies: WP-01, policy models from WP-02
-
-This package may begin in parallel with WP-03 and WP-04 once protocol and policy request types are stable.
-
-Deliverables:
-
-- `ActionConnector` trait.
-- Versioned declarative provider-profile schema.
-- HTTP connector runtime with provider-profile and resource configuration.
-- Reusable bearer-token and API-key-header authentication strategies.
-- Named semantic actions with fixed method and path templates.
-- Parameter, query, and request-body schema validation.
-- Credential injection performed inside the connector.
-- Host, scheme, port, method, and path allowlists.
-- Redirect policy.
-- Request and response header filtering.
-- Response-field filtering.
-- DNS and address validation to reduce server-side request forgery risk.
-- Body and response size limits.
-- Cloudflare DNS profile fixture covering list and create-record actions.
-
-Example provider profile:
-
-```yaml
-provider: example-api
-version: 1
-base_url: https://api.example.test
-
-authentication:
-  bearer:
-    type: bearer
-
-actions:
-  example.profile.get:
-    method: GET
-    path: /profile
-    credential_slot: read
-    classification: read
-```
-
-Example resource registration:
-
-```yaml
-resources:
-  example-api:production:
-    provider: example-api
-    credentials:
-      read:
-        secret_ref: secret://production/example-api/read
-```
-
-Provider profiles and resource registrations contain secret references, never secret values. Agents provide only the logical action, logical resource, and schema-validated parameters.
-
-The connector must reject:
-
-- Agent-supplied absolute URLs.
-- Agent-supplied secret references or credential slots.
-- Agent-selected authentication strategies.
-- Agent-supplied authorization headers.
-- Unsupported URL schemes.
-- Unknown hosts or ports.
-- Redirects to a different origin.
-- Loopback, link-local, and cloud metadata destinations unless explicitly configured for a test fixture.
-- Invalid path normalization and traversal attempts.
-- Oversized request or response bodies.
-
-Acceptance criteria:
-
-- The connector successfully calls the local test upstream with an injected canary credential.
-- The canary credential is not present in the connector response or logs.
-- A Cloudflare profile can express DNS-record list and create operations without Cloudflare-specific Rust code.
-- Provider profiles cannot override the runtime's mandatory redirect, address, or header security controls.
-- Invalid or unreviewed profile versions fail closed.
-- Negative tests cover host confusion, redirects, encoded traversal, DNS/address restrictions, and header injection.
-
-Primary file ownership:
-
-- `/crates/acf-connectors/`
-
-### WP-06 — Audit events and leak-detection tests
-
-Dependencies: WP-01; may proceed in parallel after shared IDs are stable
-
-Deliverables:
-
-- Versioned audit-event schema.
-- Audit sink trait and development JSON-lines sink.
-- Mandatory fields for identity, task, action, resource, decision, secret reference, connector outcome, and policy version.
-- Central redaction utilities.
-- Canary-secret leak test harness.
-
-Audit events must not contain:
-
-- Secret values.
-- Authorization headers.
-- Secret-provider credentials.
-- Private keys.
-- Unfiltered request or response bodies.
-
-Acceptance criteria:
-
-- Allow and deny paths both emit attributable events.
-- Tests scan stdout, stderr, audit output, formatted errors, and HTTP responses for the canary secret.
-- Audit sink failure follows explicit policy rather than silently dropping required events.
-
-Primary file ownership:
-
-- `/crates/acf-audit/`
-- Shared redaction test utilities
-
-### WP-07 — TLS 1.3 and mutual client authentication
-
-Dependencies: working WP-03 vertical slice, identity models from WP-02
-
-Deliverables:
-
-- TLS configuration using rustls.
-- Server-certificate validation.
-- Mutual TLS client authentication.
-- Certificate-to-`IdentityContext` mapping.
-- Development CA and certificate-generation instructions for tests only.
-- Certificate reload/rotation behavior.
-- Explicit minimum protocol and cipher policy.
-
-Acceptance criteria:
-
-- Connections without a trusted client certificate fail during TLS establishment.
-- A valid client identity reaches policy evaluation.
-- An expired, untrusted, or incorrectly scoped certificate is rejected.
-- The gateway does not accept agent-supplied identity headers as a substitute for verified connection identity.
-- Mutating operations do not rely on TLS 0-RTT.
-
-Primary file ownership:
-
-- TLS integration in `/crates/acf-gateway/`
-- Production identity provider in `/crates/acf-identity/`
-- Certificate test fixtures
-
-### WP-08 — Signed task capabilities and replay protection
-
-Dependencies: WP-01, WP-02, WP-03
-
-Deliverables:
-
-- Versioned task-capability claims.
-- Signature verification abstraction.
-- Issuer and audience validation.
-- `iat`, `nbf`, and `exp` enforcement.
-- Action and resource restrictions.
-- `jti` or equivalent unique capability identifier.
-- Bounded replay cache.
-- Revocation interface.
-
-Acceptance criteria:
-
-- Expired, not-yet-valid, wrong-audience, wrong-resource, and replayed capabilities are rejected.
-- One task capability cannot authorize an action not present in its claims.
-- Capability contents never include downstream credentials.
-- Clock-skew behavior is explicit and tested.
-
-Primary file ownership:
-
-- Capability models in `/crates/acf-protocol/`
-- Verification and replay logic in `/crates/acf-policy/` or a dedicated crate if justified
-
-### WP-09 — Agent Skills and MCP integration
-
-Dependencies: stable WP-03 action API, WP-05 connector actions, WP-08 task-capability flow
-
-This package is the agent-facing workflow layer. It does not hold credentials and is not an authorization boundary.
-
-Deliverables:
-
-- Thin MCP server or equivalent structured-action adapter over the existing ACF action API.
-- Resource and action discovery tools.
-- Approval request and status tools.
-- Action execution and verification tools.
-- Portable plugin metadata and MCP server declaration.
-- `acf-actions` generic workflow skill.
-- `acf-cloudflare-dns` workflow skill.
-- `acf-connector-authoring` developer skill.
-- Skill and tool-call evaluation cases for allowed, denied, approval-required, and malicious-instruction scenarios.
-
-Initial tool surface:
+- `IdentityContext`, `AuthorizationRequest`, and `PolicyEngine` traits.
+- A development identity provider, isolated from production configuration.
+- Deny-by-default typed YAML policy.
+- Explicit composition across identity, task capability, gateway policy, resource constraints, and connector contract.
+- Decision reason codes suitable for audit.
+
+Composition rule:
 
 ```text
-acf_list_resources
-acf_describe_resource
-acf_describe_action
-acf_execute_action
-acf_request_approval
-acf_get_request_status
-acf_verify_action_result
+EffectivePermission =
+  DeviceIdentity ∩ TaskCapability ∩ GatewayPolicy ∩ ResourceConstraints ∩ ConnectorContract
+approval requirement = strictest applicable requirement
+any deny, error, or missing required input = deny
 ```
+
+Acceptance criteria:
+
+- No allow decision overrides another layer's deny.
+- All `classification: mutate` actions require approval by default, and policy cannot weaken that default.
+
+#### WP-04 — Restricted semantic HTTP connector runtime
+
+Dependencies: WP-01, WP-02
+
+Deliverables:
+
+- `ActionConnector` trait and restricted HTTP runtime.
+- Bearer-token and API-key-header authentication strategies.
+- Fixed origins, methods, and path templates; redirect policy; header filtering; payload bounds.
+- DNS resolution that connects only to validated addresses, blocking loopback, link-local, and metadata destinations unless a development fixture allows them.
+- Use-binding check on the final origin before credential injection.
+- Default-deny response projection.
+- Domain-type registry with `ipv4` and `ipv6`. The `dns_name` and `dns_record_content` types arrive in WP-15.
+
+The connector rejects agent-supplied URLs, methods, paths, secret references, credential slots, authentication strategies, authorization headers, and redirects to another origin.
+
+Acceptance criteria:
+
+- The connector calls the local test upstream with an injected canary credential.
+- The canary is absent from the connector response and logs.
+- Negative tests cover host confusion, encoded traversal, `/` in path parameters, redirects, metadata destinations, DNS rebinding, and header injection.
+- Profiles cannot override the runtime's mandatory redirect, address, or header controls.
+
+#### WP-05 — Gateway semantic read vertical slice
+
+Dependencies: WP-03, WP-04
+
+Deliverables:
+
+- `acf-gateway` with `GET /healthz` and `POST /v1/actions/execute`.
+- `acf-agent` development CLI.
+- `example.profile.get` profile and local upstream fixture.
+- Request and response size limits, timeouts, and cancellation.
+- In-memory provider integration.
+
+Acceptance criteria:
+
+- The M0 demo succeeds without exposing the canary credential.
+- Authorization precedes retrieval, and retrieval precedes connector execution.
+- Denied requests never invoke the provider.
+- Cancellation does not leave credential-bearing background work running.
+
+#### WP-06 — Audit baseline and canary leak harness
+
+Dependencies: WP-01; integrates with WP-05
+
+Deliverables:
+
+- Versioned audit schema and redacted audit sink trait.
+- Development JSON-lines sink.
+- Canary leak-test harness that scans stdout, stderr, errors, metrics, audit output, and protocol responses.
+
+Acceptance criteria:
+
+- Allow and deny paths emit attributable events.
+- Request fields appear only according to their audit classification.
+- The canary secret is absent from every tested output surface.
+
+### M1 — secure read path
+
+#### WP-07 — Per-record encrypted local provider
+
+Dependencies: WP-01, WP-02
+
+Deliverables:
+
+- Authenticated manifest plus independently encrypted record format.
+- Per-record nonce and DEK handling through a reviewed AEAD implementation.
+- `KeySource` abstraction for KEK unlock, plus production validation.
+- Rollback-anchor interface and the manifest/anchor commit protocol.
+- Atomic manifest updates, crash recovery, reload notification, and cache invalidation.
+- Attested use bindings in authenticated record metadata.
+- Root-controlled `SecretAdmin` commands, including forward-moving restore.
+
+Acceptance criteria:
+
+- `get()` decrypts only the selected record.
+- A read-token lookup does not decrypt the paired write token.
+- Wrong keys, modified records, altered bindings, and truncated files fail closed. With an anchor configured, old generations also fail closed.
+- Anchor reconciliation behaves as specified for `G == A`, `G == A + 1`, `G < A`, and `G > A + 1`.
+- Without an external anchor, documentation and status report that rollback resistance is unavailable.
+- Restore never requires exporting all plaintext secrets.
+
+Detailed requirements are in [Encrypted local provider](providers/encrypted-local.md).
+
+#### WP-08 — Daemon isolation, peer identity, and mTLS
+
+Dependencies: WP-05
+
+Deliverables:
+
+- Local daemon running under a separate service identity in the production topology.
+- Permissioned Unix socket with `SO_PEERCRED` or an OS-equivalent caller context.
+- Optional launcher-registered PID or cgroup scoping of task handles.
+- Integration with a protected, non-exportable device key.
+- rustls TLS 1.3 with mutual client authentication.
+- Certificate-to-identity mapping and certificate rotation.
+- Opaque task handles. Raw capabilities never cross the agent API.
+
+Acceptance criteria:
+
+- Untrusted, expired, or incorrectly scoped certificates fail authentication.
+- The gateway does not trust agent-supplied identity headers.
+- If TLS terminates at a proxy, the proxy-to-gateway hop is mutually authenticated and preserves the verified certificate identity.
+- The agent account cannot read the daemon's mTLS private key in the documented production deployment.
+- Documentation states that peer PID and UID prove OS provenance, not whether an instruction inside the authorized agent is benign.
+- Mutations do not use TLS 0-RTT.
+
+#### WP-09 — Capability Authority and task authorization
+
+Dependencies: WP-08, WP-10
+
+Deliverables:
+
+- A Capability Authority API in `acf-control-plane`, with issuer-key separation from the gateway.
+- Scope intersection: requested scope ∩ caller entitlements ∩ resource policy.
+- Signed job-definition and trusted-scheduler authorization bases.
+- Certificate-bound capability with `cnf.x5t#S256` semantics.
+- Validation of `iss`, `aud`, `iat`, `nbf`, `exp`, action, resource, environment, parameters, and quotas.
+- Daemon-side capability storage and task-handle mapping.
+- An ADR fixing the capability wire encoding.
+
+Acceptance criteria:
+
+- Agent-requested scope is only a proposal and cannot authorize itself.
+- The same valid capability authorizes multiple permitted requests within its TTL.
+- A capability presented over a different client certificate is denied.
+- The gateway can verify capabilities but cannot mint them.
+
+#### WP-10 — Security state: replay, revocation, quotas, and rate limiting
+
+Dependencies: WP-01
+
+Deliverables:
+
+- A `StateStore` interface in `acf-state`, designed for a later shared, strongly consistent backend.
+- An embedded durable single-node implementation.
+- A `requestId` replay cache with timestamp freshness and restart rules.
+- Capability and session revocation with a revocation feed.
+- Per-task, per-principal, per-resource, and per-action quotas and rate limits.
+
+Acceptance criteria:
+
+- Reusing a `requestId` is denied.
+- After a restart without a durable replay cache, requests timestamped before start time plus the freshness window are rejected.
+- Revocation and quota updates take effect within a documented, bounded latency.
+
+#### WP-11 — Config Registry and production profile
+
+Dependencies: WP-02, WP-03
+
+Deliverables:
+
+- Signed or hash-pinned configuration bundles. Profile authoring and secret-binding administration are separate signing permissions.
+- An admission flow in which agent-authored profiles remain inert drafts.
+- `production` startup validation as defined in design §13.4.
+- Build-flavor and deployment-profile reporting.
+
+Acceptance criteria:
+
+- An unsigned or unpinned bundle fails production startup.
+- A binary built with the development feature refuses the `production` profile.
+- Production configuration cannot enable development identity, insecure key sources, the in-memory provider, or plaintext listeners.
+
+#### WP-12 — Audit integrity
+
+Dependencies: WP-06
+
+Deliverables:
+
+- Hash-linked audit events.
+- Signed checkpoints to an external append-only sink, or direct writes to a remote append-only sink.
+- Explicit policy for audit-sink failure.
+
+Acceptance criteria:
+
+- Truncation or replacement after the most recent external checkpoint is detectable.
+- A local hash chain alone is never described as sufficient against host compromise.
+- When audit is required and the sink fails, behavior follows the explicit fail-closed policy.
+
+### M2 — approved mutation path
+
+#### WP-13 — Approval Service and WebAuthn
+
+Dependencies: WP-09, WP-10, WP-11
+
+Deliverables:
+
+- An Approval Service on its own origin behind an identity-aware entry point.
+- WebAuthn registration and user-verified assertions.
+- Rendering of the gateway-built approval object.
+- Approver authorization by policy, and optional confirmation from a second device for production resources.
+- Signed one-time receipts bound to digest, approver, expiry, and nonce.
+- An internal authenticated channel for creating pending approvals and fetching receipts.
+- Human task-scope confirmation for the Capability Authority, reusing the same WebAuthn flow.
+
+Acceptance criteria:
+
+- Agent-facing APIs cannot complete an approval.
+- The requesting workload identity cannot act as approver.
+- Gateway-rendered content, not agent-authored prose, is the approval's source of truth.
+- Receipts never pass through the agent or daemon.
+
+#### WP-14 — Operation journal and mutation execution
+
+Dependencies: WP-05, WP-10, WP-13
+
+Deliverables:
+
+- RFC 8785 canonical approval objects and SHA-256 digests.
+- `idempotencyKey` handling: the same digest returns the existing operation, and a different digest is rejected.
+- Durable operation states, as defined in design §9.2.
+- Precondition evaluation at preparation time and again at execution time.
+- Atomic receipt consumption.
+- A durable `sent` journal entry before the downstream call, with no automatic retry.
+- Reconciliation through connector-defined queries or an operator decision.
+- `GET /v1/operations/{operation_id}`.
+
+Acceptance criteria:
+
+- Changing any field that the digest covers invalidates the receipt.
+- Reusing an approval receipt is denied.
+- An ambiguous downstream timeout produces `unknown`, never a retry.
+- A precondition that changed after approval causes rejection and requires a new approval.
+
+#### WP-15 — Cloudflare DNS
+
+Dependencies: WP-04 and M1 for list; WP-14 for create
+
+Deliverables:
+
+- `dns_name` and `dns_record_content` domain types covering lowercase, trailing dot, IDNA A-labels, relative-name rejection, wildcard parsing, and record-type-dependent content.
+- Cloudflare DNS list and create profiles, resource registration, and secret registrations.
+- A conflict-detection precondition for create.
+
+Acceptance criteria:
+
+- Cloudflare zone IDs can come only from `{resource.zone_id}`.
+- Constraint matching operates on normalized DNS values.
+- Cloudflare create requires a valid one-time approval receipt.
+- A read action never retrieves the write token.
+- Response fields absent from the profile allowlist do not cross the gateway.
+
+### M3 — extensions
+
+#### WP-16 — Agent Skills and MCP integration
+
+Dependencies: stable WP-09 task flow, WP-13 and WP-14 approval and operation flows, and WP-15 action contracts
+
+This package is a workflow layer, not an authorization boundary.
+
+Deliverables:
+
+- A thin MCP adapter over the daemon local API, covering:
+  - `acf_list_resources`, `acf_describe_resource`, and `acf_describe_action`.
+  - `acf_request_task` and `acf_get_task_status`.
+  - `acf_execute_action` and `acf_request_approval`.
+  - `acf_get_request_status` and `acf_verify_action_result`.
+- `acf-actions`, `acf-cloudflare-dns`, and `acf-connector-authoring` Skills.
+- Versioned tool schemas and evaluations covering malicious instructions.
 
 Required invariants:
 
-- Skills contain no provider token, secret-provider bootstrap credential, private key, storage-encryption key, or production secret value.
-- Skills never instruct an agent to use direct provider APIs, arbitrary `curl` commands, or shell-based credential injection.
-- MCP tool inputs do not allow agents to select secret references or arbitrary authorization headers.
-- MCP identity headers are not trusted unless produced by an authenticated, trusted intermediary.
-- Ignoring or modifying a skill cannot bypass gateway policy, approval, or connector constraints.
-- Write and high-impact actions remain approval-gated by the gateway, regardless of skill instructions.
+- Skills contain no token, provider credential, private key, storage key, raw capability, or production secret.
+- `acf_request_approval` creates or polls an approval. It never approves one.
+- Agent-authored connector profiles cannot activate themselves.
+- Skipping or modifying a Skill cannot bypass policy, approval, use bindings, connector validation, or response filtering.
 
 Acceptance criteria:
 
-- A supported agent runtime can discover and invoke the ACF tools through the integration package.
-- The Cloudflare DNS skill performs inspect, propose, approve, execute, and verify in the documented order.
-- A malicious prompt asking for the underlying token does not cause a secret-bearing tool response.
-- A modified skill that skips approval still receives an approval-required or denied response from the gateway.
-- Skills and tool schemas are versioned and tested together.
+- A supported agent can inspect, propose a task, request approval, execute, reconcile, and verify using the documented flow.
+- A request for the underlying token never produces a secret-bearing tool response.
+- A modified Skill that skips approval receives `approval_required` or a denial.
 
-Primary file ownership:
+#### M3 workstreams
 
-- `/integrations/mcp/`
-- `/integrations/agent-plugin/`
+These are planned after M2 and are detailed when M2 contracts are stable:
+
+- Cedar policy backend with schema validation and policy analysis. Domain normalization remains in connectors.
+- A shared, strongly consistent `StateStore` backend and high-availability gateways per environment and region.
+- Additional secret providers, starting with the [Bitwarden adapter](providers/bitwarden.md).
+- Additional connectors, such as a GitHub App connector with installation-token exchange.
+- Posture-aware policy, anomaly detection, SIEM integration, and credential inventory.
 
 ## 7. Dependency and merge order
 
 ```mermaid
 flowchart TD
     W0[WP-00 Workspace and CI] --> W1[WP-01 Protocol and secrets]
-    W1 --> W2[WP-02 Policy and dev identity]
-    W1 --> W4[WP-04 Encrypted local provider]
-    W1 --> W6[WP-06 Audit]
-    W2 --> W3[WP-03 Gateway vertical slice]
-    W2 --> W5[WP-05 HTTP connector]
-    W3 --> W7[WP-07 mTLS identity]
-    W3 --> W8[WP-08 Task capabilities]
-    W3 --> W9[WP-09 Skills and MCP]
-    W5 --> W9
-    W8 --> W9
-    W4 --> M1[Milestone 1]
-    W5 --> M1
-    W6 --> M1
-    W7 --> M1
-    W8 --> M1
-    W9 --> M2[Agent integration milestone]
+    W1 --> W2[WP-02 Config and constraints]
+    W2 --> W3[WP-03 Policy and identity]
+    W2 --> W4[WP-04 HTTP connector runtime]
+    W3 --> W5[WP-05 Gateway read slice]
+    W4 --> W5
+    W1 --> W6[WP-06 Audit baseline]
+    W5 --> M0((M0))
+    W6 --> M0
+    W1 --> W7[WP-07 Encrypted provider]
+    W2 --> W7
+    W5 --> W8[WP-08 Daemon and mTLS]
+    W1 --> W10[WP-10 Security state]
+    W8 --> W9[WP-09 Capability Authority]
+    W10 --> W9
+    W2 --> W11[WP-11 Config Registry and production profile]
+    W3 --> W11
+    W6 --> W12[WP-12 Audit integrity]
+    W7 --> M1((M1))
+    W9 --> M1
+    W11 --> M1
+    W12 --> M1
+    W9 --> W13[WP-13 Approval Service]
+    W10 --> W13
+    W11 --> W13
+    W13 --> W14[WP-14 Operation journal]
+    W14 --> W15[WP-15 Cloudflare DNS]
+    W15 --> M2((M2))
+    M2 --> W16[WP-16 Skills and MCP]
 ```
 
-Recommended merge order:
+Recommended order:
 
-1. WP-00
-2. WP-01
-3. WP-02, WP-04, and WP-06 in parallel
-4. WP-03 and WP-05 in parallel after their interfaces stabilize
-5. WP-07 and WP-08 in parallel
-6. Milestone integration and security review
-7. WP-09 after the action, approval, and task-capability contracts stabilize
+1. WP-00, then WP-01.
+2. WP-02, WP-06, and the WP-10 interfaces in parallel.
+3. WP-03 and WP-04 in parallel, then WP-05 to complete M0.
+4. WP-07, WP-08, WP-10, WP-11, and WP-12 in parallel, then WP-09 to complete M1.
+5. Security review of M1 before any mutation work.
+6. WP-13, then WP-14, then WP-15 to complete M2.
+7. WP-16 and the other M3 workstreams.
 
-## 8. Suggested parallel agent allocation
+## 8. Parallel agent allocation
 
-After WP-00 and the minimum WP-01 interfaces merge, work can be distributed as follows:
-
-| Agent lane | Primary work | Avoid editing |
+| Lane | Primary work | Avoid editing |
 | --- | --- | --- |
-| Core | WP-01 and protocol review | Provider and binary implementations |
-| Authorization | WP-02 and WP-08 | Secret providers and connectors |
-| Provider | WP-04 | Core protocol except through review requests |
-| Gateway | WP-03 and WP-07 integration | Provider internals |
-| Connector | WP-05 | Gateway lifecycle and secret-provider internals |
-| Security/observability | WP-06 and cross-cutting negative tests | Feature behavior without coordination |
-| Agent integration | WP-09 skills, MCP adapter, and workflow evals | Gateway authorization and provider internals |
+| Core | WP-01 protocol and types | Provider and binary internals |
+| Config/policy | WP-02, WP-03, WP-11 | Cryptographic storage internals |
+| Connector | WP-04, WP-15 | Capability issuance |
+| Gateway/identity | WP-05, WP-08 | Provider internals |
+| Provider | WP-07 | Public protocol without coordination |
+| Authority/state | WP-09, WP-10 | Connector profiles |
+| Approval/journal | WP-13, WP-14 | Agent Skills |
+| Audit | WP-06, WP-12 | Feature behavior without coordination |
+| Agent integration | WP-16 | Gateway authorization behavior |
 
-When fewer agents are available, combine Gateway with Connector, and combine Core with Authorization.
-
-Coordination rules:
-
-- One agent owns each crate during its initial creation.
-- Interface changes require notifying all dependent work-package owners.
-- Avoid parallel edits to the root Cargo workspace after WP-00; crate owners add dependencies through small, isolated commits.
-- Each PR states which invariants it introduces or relies on.
-- Integration commits must not bypass a failing security test to resolve merge conflicts.
+One owner controls each crate during its initial creation. Interface changes require notifying dependent lanes. Integration commits must not disable security tests to resolve conflicts.
 
 ## 9. Pull request contract
 
-Every implementation PR must contain:
+Every implementation PR contains:
 
-- Work-package identifier in the title or description.
+- Work-package identifier.
 - Scope and explicit non-goals.
 - Security invariants affected.
-- Test evidence.
-- New dependencies and why they are required.
-- Any plaintext secret boundary introduced.
-- Follow-up work or known limitations.
-
-Recommended PR size:
-
-- One crate or one coherent vertical behavior.
-- Reviewable without unrelated refactoring.
-- No hidden dependency upgrades mixed with feature code.
+- Test evidence, including negative paths.
+- New dependencies and their purpose.
+- Any plaintext or trusted-state boundary introduced.
+- Migration and compatibility impact on profiles, capabilities, or stored data.
+- Known limitations and follow-up work.
 
 ## 10. Definition of done
 
 A work package is done when:
 
-- Its acceptance criteria are covered by automated tests where practical.
-- `cargo fmt`, Clippy, unit tests, integration tests, audit, and dependency policy pass.
-- Public APIs have concise documentation.
-- Errors are typed and do not reveal secrets.
-- Logs and audit events have been reviewed for secret-bearing fields.
-- New network behavior has timeouts and bounded payloads.
+- Acceptance criteria are covered by automated tests where practical.
+- Formatting, Clippy, tests, dependency audit, and license policy pass.
+- Errors are typed and redacted.
+- Network behavior has timeouts and bounded payloads.
+- Configuration changes fail closed and have migration tests when required.
 - Threat-model implications are documented.
-- No production behavior relies on development identity or test credentials.
+- No production behavior relies on development identity, test credentials, or test key sources.
 
 ## 11. Security test matrix
 
-The integration suite should grow to cover:
-
 | Scenario | Expected result |
 | --- | --- |
-| Known identity, allowed task/action/resource | Allow |
-| Unknown identity | Deny before secret retrieval |
-| Missing policy | Deny before secret retrieval |
-| Expired task capability | Deny |
-| Replayed task capability | Deny |
-| Unknown resource | Deny |
-| Disallowed method or path | Deny |
-| Agent-supplied authorization header | Reject |
-| Redirect to another origin | Reject |
-| Link-local or metadata destination | Reject |
-| Secret-provider timeout | Fail closed |
-| Audit-required sink unavailable | Follow explicit fail-closed policy |
-| Downstream timeout or oversized response | Abort safely |
+| Known identity, permitted task/action/resource | Allow |
+| Agent proposes scope without trusted authorization | Deny issuance |
+| Capability presented with wrong client certificate | Deny |
+| Expired or revoked capability | Deny |
+| Second allowed request using the same valid capability | Allow |
+| Reused `requestId` | Deny as replay |
+| Request timestamp outside freshness window | Deny |
+| Capability parameter or quota exceeded | Deny |
+| Unknown action or resource | Deny before retrieval |
+| Agent-supplied method, path, URL, credential slot, or auth header | Reject |
+| Resource-binding shadowing attempt through `params` | Reject |
+| Secret use-binding origin/connector mismatch | Deny before injection |
+| Provider-attested binding broader than registry binding | Deny |
+| Missing response-field allowlist | Return no unapproved fields; fail validation |
+| Agent attempts to approve its own request | Deny |
+| Requesting workload identity acts as approver | Deny |
+| Modified canonical approval object or changed profile/policy version | Deny |
+| Reused approval receipt | Deny |
+| Same `idempotencyKey` with a different digest | Reject |
+| Precondition changed after approval | Reject; require new approval |
+| Ambiguous mutation timeout | Mark `unknown`; do not retry automatically |
+| Old encrypted generation with rollback anchor | Deny |
+| Old encrypted generation without anchor | Report unsupported rollback guarantee |
+| Audit chain truncated past external checkpoint | Detect |
 | Canary secret in error path | Canary absent from all outputs |
-| Untrusted or expired client certificate | TLS failure |
+| Production config enables development identity, key source, or in-memory provider | Startup failure |
+| Development-feature build started with `production` profile | Startup failure |
 
-## 12. Deliberately deferred work
+## 12. Deliberately out of scope
 
-The following are outside Milestone 1:
-
-- Web management console.
-- General-purpose OPA/Rego or Cedar integration.
+- Web management console beyond the Approval Service.
 - Multi-tenant control plane.
-- Production database for configuration.
-- Provider-specific private-network integrations.
+- Production configuration database.
 - Kubernetes operator.
-- Multi-region availability.
-- Automated rotation for every credential type.
+- Downstream-native short-lived credential brokering such as STS.
 - General-purpose command execution.
-- Arbitrary secret-value retrieval endpoint.
-- Broad connector catalog.
+- Static token injection or Local Lease Mode.
+- Arbitrary secret retrieval and unrestricted HTTP proxy endpoints.
+- A broad connector catalog.
 
-Deferred work must not be pulled into an early work package unless it blocks the first demonstrable outcome.
+Out-of-scope work must not be pulled into an early work package unless it blocks a milestone's demonstrable outcome.
 
-## 13. Milestone 1 integration checklist
+## 13. Immediate next actions
 
-- [ ] Workspace and CI are green.
-- [ ] Protected secret types and provider interfaces are merged.
-- [ ] Static policy is deny by default.
-- [ ] Development identity is isolated from production configuration.
-- [ ] Agent-to-gateway local vertical slice works.
-- [ ] Encrypted local provider persists and retrieves a test secret without plaintext disk storage.
-- [ ] HTTP connector enforces destination and request constraints.
-- [ ] mTLS maps the client certificate to an identity context.
-- [ ] Signed task capabilities and replay protection are active.
-- [ ] Audit events are attributable and redacted.
-- [ ] Canary-secret leak suite passes.
-- [ ] End-to-end demo succeeds without exposing either credential to the agent.
-- [ ] Security review records residual risks and the next hardening priorities.
+1. Merge WP-00 before parallel crate creation.
+2. Freeze the minimum WP-01 identifier, secret-type, and `ResolvedSecret` contracts.
+3. Draft the WP-02 schemas, including secret registrations and the constraint language.
+4. Write ADRs for:
+   - The record encryption algorithm and envelope.
+   - The capability wire encoding.
+   - The `StateStore` consistency requirements.
+5. Build `example.profile.get` as the first semantic-action fixture.
 
-## 14. Immediate next actions
+Milestone gates:
 
-1. Open and merge WP-00: Cargo workspace and CI.
-2. Assign an owner to WP-01 before other crates define competing interfaces.
-3. Define the encrypted local storage format and prepare one non-production canary secret.
-4. Prepare the local upstream fixture and canary token.
-5. After WP-01 merges, start WP-02, WP-04, and WP-06 in parallel.
-
-The first coding task is WP-00. The first security-critical task is WP-01. The first product proof is the WP-03 local vertical slice, and the first real integration proof is WP-04 joined with WP-05.
+- **First coding task:** WP-00.
+- **First cross-team contract:** WP-01.
+- **First demonstrable product proof:** WP-05.
+- **First production-shaped security proof:** M1 (WP-07 through WP-12).
+- **Mutation work:** must not begin until the M1 security review is complete and the WP-13 approval contract has been reviewed.
