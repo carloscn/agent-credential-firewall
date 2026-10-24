@@ -8,9 +8,19 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+url.workspace = true
+zeroize.workspace = true
 acf-config.workspace = true
 acf-protocol.workspace = true
 acf-secrets.workspace = true
+
+[dev-dependencies]
+acf-secrets = { workspace = true, features = ["in-memory"] }
 
 [lints]
 workspace = true

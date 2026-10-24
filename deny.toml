@@ -18,6 +18,9 @@ allow = [
     "BSD-2-Clause",
     "BSD-3-Clause",
     "CC0-1.0",
+    # Mozilla root certificate data (webpki-root-certs), used for TLS server
+    # verification via rustls-platform-verifier.
+    "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
     "Unicode-3.0",
