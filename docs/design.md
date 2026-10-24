@@ -98,7 +98,9 @@ The first version will not:
 ```mermaid
 flowchart LR
     U[User] --> A[AI Agent]
-    A --> D[Local Agent Daemon]
+    S[Agent Skills] -. workflow guidance .-> A
+    A --> M[ACF MCP Server / Action API]
+    M --> D[Local Agent Daemon]
     D -->|Authenticated encrypted transport| G[Credential Gateway]
     G --> I[Identity and Posture Provider]
     G --> P[Policy Engine]
@@ -118,7 +120,11 @@ Less trusted                         More trusted
 
 User content / repositories
         ↓
+Agent Skills and workflow instructions
+        ↓
 AI agent process
+        ↓
+MCP tools / structured action API
         ↓
 Local agent daemon
         ↓  authenticated encrypted connection
@@ -129,9 +135,60 @@ Bitwarden and approved downstream services
 
 Agents and the content they process are treated as potentially hostile. The gateway is a high-value security boundary and must not execute agent-provided code.
 
+### 6.2 Agent integration layers
+
+ACF should support mainstream agent runtimes through a portable integration package containing Agent Skills and an MCP server or equivalent structured action API.
+
+This follows the common plugin separation in which Skills provide reusable workflows and an MCP server provides controlled tools, authentication, authorization, and live actions. See the [OpenAI plugin architecture](https://developers.openai.com/plugins/concepts/plugins) for one concrete packaging model. ACF's gateway and action contracts remain agent-runtime agnostic.
+
+```text
+Agent Plugin / Integration Package
+├── Skills
+│   ├── acf-actions
+│   ├── acf-cloudflare-dns
+│   └── acf-connector-authoring
+└── MCP Server / Action API Adapter
+    ├── Resource discovery
+    ├── Action discovery
+    ├── Approval requests
+    ├── Action execution
+    └── Result verification
+```
+
+The layers have distinct responsibilities:
+
+- **Skills** teach the model when and how to use ACF actions, including planning, approval, verification, and output expectations.
+- **MCP tools or an equivalent action API** provide structured, bounded operations and machine-readable results.
+- **The local daemon** attaches trusted local process, agent, device, and task context that the model cannot choose freely.
+- **The gateway** authenticates, authorizes, retrieves credentials, executes connectors, and audits outcomes.
+
+Skills are not part of the authorization boundary. A malicious, modified, or ignored skill must not enable an operation that the gateway would otherwise deny. Skills and adapters must never contain provider tokens, Bitwarden access tokens, private keys, or production secret values.
+
 ## 7. Core components
 
-### 7.1 Local Agent Daemon
+### 7.1 Agent Skills and MCP Adapter
+
+The initial integration package should provide three focused skills:
+
+- `acf-actions` for the generic discover, plan, approve, execute, and verify workflow.
+- `acf-cloudflare-dns` for the first provider-specific workflow example.
+- `acf-connector-authoring` for reviewing and developing provider profiles safely.
+
+The MCP server or equivalent adapter should expose a small structured surface such as:
+
+```text
+acf_list_resources
+acf_describe_resource
+acf_describe_action
+acf_execute_action
+acf_request_approval
+acf_get_request_status
+acf_verify_action_result
+```
+
+Skills may sequence these tools but may not manufacture identity, approvals, task capabilities, or secret references. High-impact actions remain subject to server-side policy and approval enforcement.
+
+### 7.2 Local Agent Daemon
 
 The daemon provides a small local API to the agent and attaches trusted local context that the model cannot freely choose.
 
@@ -146,7 +203,7 @@ Responsibilities:
 
 The daemon is not trusted with a Bitwarden machine-account token.
 
-### 7.2 Credential Gateway
+### 7.3 Credential Gateway
 
 The gateway is the main enforcement point.
 
@@ -163,7 +220,7 @@ Responsibilities:
 
 The gateway must never expose a general-purpose `get any secret` endpoint to agents.
 
-### 7.3 Identity Context Provider
+### 7.4 Identity Context Provider
 
 The gateway should obtain identity and posture data through a provider interface rather than depend on a specific network or identity vendor:
 
@@ -178,7 +235,7 @@ Provider output must be derived from authenticated connection state or signed as
 
 Possible implementations include mutual TLS, workload identity, signed device certificates, private-network identity, or an organization's existing identity-aware proxy.
 
-### 7.4 Policy Engine
+### 7.5 Policy Engine
 
 Authorization decisions should consider:
 
@@ -215,7 +272,7 @@ Example decision input:
 }
 ```
 
-### 7.5 Secret Provider Interface
+### 7.6 Secret Provider Interface
 
 The gateway should isolate secret-manager-specific behavior behind an interface:
 
@@ -230,11 +287,11 @@ The initial implementation uses Bitwarden Secrets Manager SDK. Future providers 
 
 Secret values must be represented by types that discourage logging, serialization, and accidental string formatting.
 
-### 7.6 Action Connectors
+### 7.7 Action Connectors
 
 Action connectors use credentials without revealing them to the agent. The gateway core must not contain one hard-coded implementation for every token-using service. Connector support is divided into three layers.
 
-#### 7.6.1 Declarative HTTP provider profiles
+#### 7.7.1 Declarative HTTP provider profiles
 
 Most REST APIs that use bearer tokens, API-key headers, or basic authentication should be supported by a generic HTTP connector runtime and an administrator-reviewed provider profile.
 
@@ -252,7 +309,7 @@ A provider profile defines:
 
 Provider profiles contain no secret values. Resource registrations bind credential slots to logical `SecretRef` values.
 
-#### 7.6.2 Reusable authentication strategies
+#### 7.7.2 Reusable authentication strategies
 
 The connector runtime should provide a small set of reusable authentication modules:
 
@@ -269,7 +326,7 @@ enum AuthenticationStrategy {
 
 Not every strategy must be implemented in the first release. The abstraction prevents authentication behavior from being duplicated across provider profiles.
 
-#### 7.6.3 Native connectors
+#### 7.7.3 Native connectors
 
 A dedicated Rust connector is appropriate when a service requires:
 
@@ -297,7 +354,7 @@ pub trait ActionConnector {
 }
 ```
 
-#### 7.6.4 Connector security boundary
+#### 7.7.4 Connector security boundary
 
 Agents select only a logical action, resource, and validated parameters. Agents must not select:
 
@@ -312,11 +369,11 @@ The gateway resolves these values from trusted provider and resource configurati
 
 OpenAPI documents may be used to generate an initial provider profile, but generated profiles are untrusted input until an administrator reviews their hosts, endpoints, schemas, credential placement, response filtering, and approval requirements.
 
-### 7.7 Example: Cloudflare DNS
+### 7.8 Example: Cloudflare DNS
 
 This example shows the complete lifecycle for an agent that needs to inspect and create DNS records without receiving a Cloudflare API token.
 
-#### 7.7.1 Credential provisioning
+#### 7.8.1 Credential provisioning
 
 The administrator creates two Cloudflare API tokens scoped to one specific zone:
 
@@ -343,7 +400,7 @@ Only the appropriate gateway machine account can read this project. The agent ha
 
 Cloudflare documents `DNS Read` and `DNS Write` as zone permissions and recommends scoped API tokens instead of the legacy global API key. See the [Cloudflare API token permissions](https://developers.cloudflare.com/fundamentals/api/reference/permissions/).
 
-#### 7.7.2 Declarative provider profile
+#### 7.8.2 Declarative provider profile
 
 Cloudflare DNS can initially use the generic HTTP connector:
 
@@ -386,7 +443,7 @@ actions:
 
 The list and create actions map to Cloudflare's documented `GET /zones/{zone_id}/dns_records` and `POST /zones/{zone_id}/dns_records` endpoints. See the [Cloudflare DNS Records API](https://developers.cloudflare.com/api/resources/dns/subresources/records/).
 
-#### 7.7.3 Resource registration
+#### 7.8.3 Resource registration
 
 The administrator registers the actual zone and binds credential slots to logical Bitwarden references:
 
@@ -416,7 +473,7 @@ resources:
 
 The URI beginning with `bitwarden://` is an ACF logical reference, not a secret value and not necessarily a native Bitwarden URI format.
 
-#### 7.7.4 Query interaction
+#### 7.8.4 Query interaction
 
 The user asks the agent to inspect `api.example.com`. The orchestrator grants a short-lived task capability containing:
 
@@ -460,7 +517,7 @@ The gateway:
 7. Returns DNS data without returning the token.
 8. Emits a redacted audit event.
 
-#### 7.7.5 Mutating interaction and approval
+#### 7.8.5 Mutating interaction and approval
 
 To create a record, the agent submits:
 
@@ -507,7 +564,7 @@ Approval must bind the approver, request hash, action, resource, exact parameter
 
 After approval, the gateway revalidates the complete request, resolves the `write` credential slot, retrieves the write token, calls Cloudflare, filters the result, and records the outcome. Replay protection prevents the approved mutation from being submitted twice.
 
-#### 7.7.6 Audit and rotation
+#### 7.8.6 Audit and rotation
 
 The audit event records identity, task, action, logical resource, approval, logical secret reference, requested DNS change, provider result, and timestamps. It never records the bearer token, authorization header, Bitwarden access token, or private keys.
 
@@ -826,7 +883,7 @@ The first protocol should use HTTP/2 with JSON over TLS rather than a custom tra
 
 ### 17.4 Workspace structure
 
-The repository should use a Cargo workspace with explicit security boundaries:
+The repository should use a Cargo workspace with explicit security boundaries and a separate agent-integration layer:
 
 ```text
 crates/
@@ -839,9 +896,19 @@ crates/
 ├── acf-bitwarden/        # Bitwarden SDK adapter
 ├── acf-connectors/       # Downstream action connectors
 └── acf-audit/            # Structured audit events
+
+integrations/
+├── mcp/                  # Thin MCP / structured-action adapter
+└── agent-plugin/         # Portable agent integration package
+    ├── plugin.json       # Plugin metadata
+    ├── mcp.json          # MCP server declaration
+    └── skills/
+        ├── acf-actions/
+        ├── acf-cloudflare-dns/
+        └── acf-connector-authoring/
 ```
 
-Shared crates must preserve dependency direction: provider and connector implementations may depend on core interfaces, but core policy and protocol crates must not depend on a particular provider.
+Shared crates must preserve dependency direction: provider and connector implementations may depend on core interfaces, but core policy and protocol crates must not depend on a particular provider. Skills and MCP adapters depend on the public action contract; the gateway must never depend on skill behavior for security decisions.
 
 ### 17.5 Secret-handling requirements
 
@@ -870,6 +937,8 @@ Rust code that handles secret material must:
 
 - Signed task capabilities.
 - Local agent daemon.
+- MCP / structured-action adapter.
+- Initial `acf-actions` and `acf-cloudflare-dns` skills.
 - GitHub action connector.
 - Session and capability revocation.
 - Approval workflow for sensitive actions.

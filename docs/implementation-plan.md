@@ -96,6 +96,16 @@ crates/
 ├── acf-bitwarden/        # Bitwarden Secrets Manager adapter
 ├── acf-connectors/       # Downstream action connectors
 └── acf-audit/            # Structured, redacted audit events
+
+integrations/
+├── mcp/                  # Thin MCP / action API adapter
+└── agent-plugin/         # Portable agent integration package
+    ├── plugin.json       # Plugin metadata
+    ├── mcp.json          # MCP server declaration
+    └── skills/
+        ├── acf-actions/
+        ├── acf-cloudflare-dns/
+        └── acf-connector-authoring/
 ```
 
 Dependency direction:
@@ -115,6 +125,7 @@ Rules:
 - Connectors may consume protected secret types but must not expose them through protocol models.
 - API response types must not contain `SecretMaterial`.
 - Binaries should have thin entry points; behavior belongs in testable libraries.
+- Skills and MCP adapters depend on the public action contract; gateway authorization must never depend on skill compliance.
 
 ## 6. Work packages
 
@@ -467,6 +478,58 @@ Primary file ownership:
 - Capability models in `/crates/acf-protocol/`
 - Verification and replay logic in `/crates/acf-policy/` or a dedicated crate if justified
 
+### WP-09 — Agent Skills and MCP integration
+
+Dependencies: stable WP-03 action API, WP-05 connector actions, WP-08 task-capability flow
+
+This package is the agent-facing workflow layer. It does not hold credentials and is not an authorization boundary.
+
+Deliverables:
+
+- Thin MCP server or equivalent structured-action adapter over the existing ACF action API.
+- Resource and action discovery tools.
+- Approval request and status tools.
+- Action execution and verification tools.
+- Portable plugin metadata and MCP server declaration.
+- `acf-actions` generic workflow skill.
+- `acf-cloudflare-dns` workflow skill.
+- `acf-connector-authoring` developer skill.
+- Skill and tool-call evaluation cases for allowed, denied, approval-required, and malicious-instruction scenarios.
+
+Initial tool surface:
+
+```text
+acf_list_resources
+acf_describe_resource
+acf_describe_action
+acf_execute_action
+acf_request_approval
+acf_get_request_status
+acf_verify_action_result
+```
+
+Required invariants:
+
+- Skills contain no provider token, Bitwarden credential, private key, or production secret value.
+- Skills never instruct an agent to use direct provider APIs, arbitrary `curl` commands, or shell-based credential injection.
+- MCP tool inputs do not allow agents to select secret references or arbitrary authorization headers.
+- MCP identity headers are not trusted unless produced by an authenticated, trusted intermediary.
+- Ignoring or modifying a skill cannot bypass gateway policy, approval, or connector constraints.
+- Write and high-impact actions remain approval-gated by the gateway, regardless of skill instructions.
+
+Acceptance criteria:
+
+- A supported agent runtime can discover and invoke the ACF tools through the integration package.
+- The Cloudflare DNS skill performs inspect, propose, approve, execute, and verify in the documented order.
+- A malicious prompt asking for the underlying token does not cause a secret-bearing tool response.
+- A modified skill that skips approval still receives an approval-required or denied response from the gateway.
+- Skills and tool schemas are versioned and tested together.
+
+Primary file ownership:
+
+- `/integrations/mcp/`
+- `/integrations/agent-plugin/`
+
 ## 7. Dependency and merge order
 
 ```mermaid
@@ -479,11 +542,15 @@ flowchart TD
     W2 --> W5[WP-05 HTTP connector]
     W3 --> W7[WP-07 mTLS identity]
     W3 --> W8[WP-08 Task capabilities]
+    W3 --> W9[WP-09 Skills and MCP]
+    W5 --> W9
+    W8 --> W9
     W4 --> M1[Milestone 1]
     W5 --> M1
     W6 --> M1
     W7 --> M1
     W8 --> M1
+    W9 --> M2[Agent integration milestone]
 ```
 
 Recommended merge order:
@@ -494,6 +561,7 @@ Recommended merge order:
 4. WP-03 and WP-05 in parallel after their interfaces stabilize
 5. WP-07 and WP-08 in parallel
 6. Milestone integration and security review
+7. WP-09 after the action, approval, and task-capability contracts stabilize
 
 ## 8. Suggested parallel agent allocation
 
@@ -507,6 +575,7 @@ After WP-00 and the minimum WP-01 interfaces merge, work can be distributed as f
 | Gateway | WP-03 and WP-07 integration | Provider internals |
 | Connector | WP-05 | Gateway lifecycle and Bitwarden internals |
 | Security/observability | WP-06 and cross-cutting negative tests | Feature behavior without coordination |
+| Agent integration | WP-09 skills, MCP adapter, and workflow evals | Gateway authorization and provider internals |
 
 When fewer agents are available, combine Gateway with Connector, and combine Core with Authorization.
 
