@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -15,7 +15,10 @@ use acf_connectors::{
     ActionConnector, ConnectorCall, ConnectorError, ConnectorOutput, HttpConnector, HttpLimits,
     NetworkPolicy, SystemResolver,
 };
-use acf_gateway::{AuditSettings, Gateway, GatewayError, ProviderRegistry, ServerLimits, router};
+use acf_gateway::{
+    AuditSettings, Gateway, GatewayError, ProviderRegistry, RateLimits, ServerLimits,
+    StateSettings, router,
+};
 use acf_identity::{ConnectionInfo, DevelopmentIdentityProvider};
 use acf_policy::{Authorizer, AuthorizerSettings};
 use acf_protocol::{
@@ -25,8 +28,11 @@ use acf_secrets::{
     InMemoryProvider, Namespace, ResolvedSecret, SecretAdmin, SecretError, SecretMaterial,
     SecretProvider, SecretRef,
 };
+use acf_state::{MemoryStateStore, Revocation, RevocationTarget, SqliteStateStore, StateStore};
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -198,6 +204,7 @@ struct Harness {
     events: Events,
     upstream: UpstreamLog,
     audit: Arc<MemorySink>,
+    state: Arc<dyn StateStore>,
 }
 
 fn audit_settings(sink: Arc<dyn AuditSink>) -> AuditSettings {
@@ -213,77 +220,149 @@ fn audit_settings(sink: Arc<dyn AuditSink>) -> AuditSettings {
     }
 }
 
-async fn harness(principal: &str, delay: Duration, seed: bool) -> Harness {
-    harness_with(principal, delay, seed, None).await
+fn now() -> i64 {
+    OffsetDateTime::now_utc().unix_timestamp()
+}
+
+/// A memory store that "started" an hour ago, so the restart rule does not
+/// affect tests that are not about it.
+fn test_state(store: Arc<dyn StateStore>) -> StateSettings {
+    StateSettings::new(store, now() - 3600)
+}
+
+/// Builds a gateway with a recording upstream, provider, and connector.
+struct Setup {
+    principal: &'static str,
+    delay: Duration,
+    seed: bool,
+    sink: Option<Arc<dyn AuditSink>>,
+    store: Option<Arc<dyn StateStore>>,
+    started_at: Option<i64>,
+    rate_limits: RateLimits,
+    resource_constraints: Option<&'static str>,
+}
+
+impl Setup {
+    fn new(principal: &'static str) -> Self {
+        Self {
+            principal,
+            delay: Duration::ZERO,
+            seed: true,
+            sink: None,
+            store: None,
+            started_at: None,
+            rate_limits: RateLimits::default(),
+            resource_constraints: None,
+        }
+    }
+
+    async fn build(self) -> Harness {
+        let (port, upstream) = start_upstream(self.delay).await;
+        let origin = format!("http://127.0.0.1:{port}");
+        let mut bundle = BUNDLE.replace("{ORIGIN}", &origin);
+        if let Some(constraints) = self.resource_constraints {
+            bundle = bundle.replacen(
+                "    environment: development\n    credentials:",
+                &format!(
+                    "    environment: development\n    constraints: {constraints}\n    credentials:"
+                ),
+                1,
+            );
+        }
+        let config = load_yaml(&bundle).unwrap();
+
+        let secrets = Arc::new(InMemoryProvider::new([
+            Namespace::new("development").unwrap()
+        ]));
+        if self.seed {
+            let reference = SecretRef::parse("secret://development/example-api/read").unwrap();
+            let binding = config.secret(&reference).unwrap().use_binding.clone();
+            secrets
+                .put(
+                    &reference,
+                    SecretMaterial::from_string(CANARY.to_owned()),
+                    binding,
+                )
+                .await
+                .unwrap();
+        }
+        let events: Events = Arc::default();
+        let provider = Arc::new(RecordingProvider {
+            inner: secrets,
+            events: Arc::clone(&events),
+        });
+        let connector = Arc::new(RecordingConnector {
+            inner: HttpConnector::new(
+                NetworkPolicy::development_loopback(),
+                Arc::new(SystemResolver),
+                HttpLimits::default(),
+            )
+            .unwrap(),
+            events: Arc::clone(&events),
+        });
+        let settings = AuthorizerSettings {
+            audience: AudienceId::new("acf-gateway-dev").unwrap(),
+            clock_skew_secs: 30,
+        };
+        let authorizer = Authorizer::new(config, POLICY, settings).unwrap();
+        let identity = Arc::new(DevelopmentIdentityProvider::new(
+            PrincipalId::new(self.principal).unwrap(),
+            None,
+            BTreeSet::new(),
+            None,
+        ));
+        let registry = ProviderRegistry::default().with("development", provider);
+        let audit = Arc::new(MemorySink::default());
+        let sink = self.sink.unwrap_or_else(|| audit.clone());
+        let store = self
+            .store
+            .unwrap_or_else(|| Arc::new(MemoryStateStore::new()));
+        let mut state =
+            StateSettings::new(Arc::clone(&store), self.started_at.unwrap_or(now() - 3600));
+        state.rate_limits = self.rate_limits;
+        let gateway = Gateway::new(
+            authorizer,
+            identity,
+            registry,
+            connector,
+            audit_settings(sink),
+            state,
+        )
+        .unwrap();
+        Harness {
+            gateway: Arc::new(gateway),
+            events,
+            upstream,
+            audit,
+            state: store,
+        }
+    }
+}
+
+async fn harness(principal: &'static str, delay: Duration, seed: bool) -> Harness {
+    Setup {
+        delay,
+        seed,
+        ..Setup::new(principal)
+    }
+    .build()
+    .await
 }
 
 async fn harness_with(
-    principal: &str,
+    principal: &'static str,
     delay: Duration,
     seed: bool,
     sink: Option<Arc<dyn AuditSink>>,
 ) -> Harness {
-    let (port, upstream) = start_upstream(delay).await;
-    let origin = format!("http://127.0.0.1:{port}");
-    let config = load_yaml(&BUNDLE.replace("{ORIGIN}", &origin)).unwrap();
-
-    let store = Arc::new(InMemoryProvider::new([
-        Namespace::new("development").unwrap()
-    ]));
-    if seed {
-        let reference = SecretRef::parse("secret://development/example-api/read").unwrap();
-        let binding = config.secret(&reference).unwrap().use_binding.clone();
-        store
-            .put(
-                &reference,
-                SecretMaterial::from_string(CANARY.to_owned()),
-                binding,
-            )
-            .await
-            .unwrap();
+    Setup {
+        delay,
+        seed,
+        sink,
+        ..Setup::new(principal)
     }
-    let events: Events = Arc::default();
-    let provider = Arc::new(RecordingProvider {
-        inner: store,
-        events: Arc::clone(&events),
-    });
-    let connector = Arc::new(RecordingConnector {
-        inner: HttpConnector::new(
-            NetworkPolicy::development_loopback(),
-            Arc::new(SystemResolver),
-            HttpLimits::default(),
-        )
-        .unwrap(),
-        events: Arc::clone(&events),
-    });
-    let settings = AuthorizerSettings {
-        audience: AudienceId::new("acf-gateway-dev").unwrap(),
-        clock_skew_secs: 30,
-    };
-    let authorizer = Authorizer::new(config, POLICY, settings).unwrap();
-    let identity = Arc::new(DevelopmentIdentityProvider::new(
-        PrincipalId::new(principal).unwrap(),
-        None,
-        BTreeSet::new(),
-        None,
-    ));
-    let registry = ProviderRegistry::default().with("development", provider);
-    let audit = Arc::new(MemorySink::default());
-    let sink = sink.unwrap_or_else(|| audit.clone());
-    let gateway = Gateway::new(
-        authorizer,
-        identity,
-        registry,
-        connector,
-        audit_settings(sink),
-    )
-    .unwrap();
-    Harness {
-        gateway: Arc::new(gateway),
-        events,
-        upstream,
-        audit,
-    }
+    .build()
+    .await
 }
 
 async fn serve(gateway: Arc<Gateway>, limits: ServerLimits) -> String {
@@ -297,10 +376,22 @@ async fn serve(gateway: Arc<Gateway>, limits: ServerLimits) -> String {
     format!("http://{address}")
 }
 
+static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+
+/// A request with a unique identifier and the current time.
 fn request(action: &str, resource: &str, params: &Value) -> ActionRequest {
+    request_at(action, resource, params, now())
+}
+
+fn request_at(action: &str, resource: &str, params: &Value, timestamp: i64) -> ActionRequest {
+    let id = NEXT_REQUEST.fetch_add(1, Ordering::SeqCst);
+    let timestamp = OffsetDateTime::from_unix_timestamp(timestamp)
+        .unwrap()
+        .format(&Rfc3339)
+        .unwrap();
     serde_json::from_value(json!({
-        "requestId": "req-1",
-        "timestamp": "2026-10-24T18:00:00Z",
+        "requestId": format!("req-{id}"),
+        "timestamp": timestamp,
         "taskId": "dev-task",
         "action": action,
         "resource": resource,
@@ -500,6 +591,7 @@ async fn unreachable_upstream_is_a_failure_not_a_denial() {
             .unwrap(),
         ),
         audit_settings(Arc::new(MemorySink::default())),
+        test_state(Arc::new(MemoryStateStore::new())),
     )
     .unwrap();
     let response = gateway
@@ -627,6 +719,7 @@ async fn startup_rejects_unsafe_wiring() {
         ProviderRegistry::default(),
         connector.clone(),
         audit_settings(Arc::new(MemorySink::default())),
+        test_state(Arc::new(MemoryStateStore::new())),
     );
     assert_eq!(
         result.err(),
@@ -642,6 +735,7 @@ async fn startup_rejects_unsafe_wiring() {
         ProviderRegistry::default(),
         connector,
         audit_settings(Arc::new(MemorySink::default())),
+        test_state(Arc::new(MemoryStateStore::new())),
     );
     assert_eq!(result.err(), Some(GatewayError::IdentityProviderRejected));
 }
@@ -653,16 +747,16 @@ async fn startup_rejects_unsafe_wiring() {
 #[tokio::test]
 async fn allowed_requests_emit_attributable_decision_and_outcome_events() {
     let h = harness("dev-agent", Duration::ZERO, true).await;
-    h.gateway
-        .execute(&ConnectionInfo::default(), profile_get())
-        .await;
+    let call = profile_get();
+    let request_id = call.request_id.clone();
+    h.gateway.execute(&ConnectionInfo::default(), call).await;
 
     let events = h.audit.events();
     let [decision, outcome] = events.as_slice() else {
         panic!("{events:#?}")
     };
     for event in [decision, outcome] {
-        assert_eq!(event.request_id.as_str(), "req-1");
+        assert_eq!(event.request_id, request_id);
         assert_eq!(event.task_id.as_str(), "dev-task");
         assert_eq!(
             event.principal.as_ref().map(PrincipalId::as_str),
@@ -809,4 +903,255 @@ async fn required_audit_fails_closed_before_the_credential_is_touched() {
         matches!(response, ActionResponse::Denied { .. }),
         "{response:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Security state: freshness, replay, revocation, quotas, rate limits
+// ---------------------------------------------------------------------------
+
+async fn denial(h: &Harness, request: ActionRequest) -> (DenialReason, Option<String>) {
+    let response = h.gateway.execute(&ConnectionInfo::default(), request).await;
+    let ActionResponse::Denied { reason, .. } = response else {
+        panic!("expected a denial, got {response:?}")
+    };
+    let code = h.audit.events().last().and_then(|e| e.reason.clone());
+    (reason, code)
+}
+
+async fn completes(h: &Harness, request: ActionRequest) {
+    let response = h.gateway.execute(&ConnectionInfo::default(), request).await;
+    assert!(
+        matches!(response, ActionResponse::Completed { .. }),
+        "{response:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_request_identifier_works_once() {
+    let h = harness("dev-agent", Duration::ZERO, true).await;
+    let call = profile_get();
+    completes(&h, call.clone()).await;
+    assert_eq!(
+        denial(&h, call).await,
+        (DenialReason::Replay, Some("replayed_request".to_owned()))
+    );
+    // The replay never reached the provider: one retrieve and one execute.
+    assert_eq!(*h.events.lock().unwrap(), ["retrieve", "execute"]);
+}
+
+#[tokio::test]
+async fn stale_and_future_requests_are_refused() {
+    let h = harness("dev-agent", Duration::ZERO, true).await;
+    for timestamp in [now() - 301, now() + 31] {
+        let call = request_at(
+            "example.profile.get",
+            "example-api:development",
+            &json!({}),
+            timestamp,
+        );
+        assert_eq!(
+            denial(&h, call).await,
+            (DenialReason::Replay, Some("stale_request".to_owned()))
+        );
+    }
+    completes(
+        &h,
+        request_at(
+            "example.profile.get",
+            "example-api:development",
+            &json!({}),
+            now() - 290,
+        ),
+    )
+    .await;
+    assert_eq!(h.events.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_non_durable_replay_cache_refuses_requests_from_before_a_restart() {
+    // Just restarted with a memory store: a fresh-looking request could be a
+    // replay the previous process already accepted.
+    let h = Setup {
+        started_at: Some(now()),
+        ..Setup::new("dev-agent")
+    }
+    .build()
+    .await;
+    assert_eq!(
+        denial(&h, profile_get()).await,
+        (
+            DenialReason::Replay,
+            Some("request_predates_restart".to_owned())
+        )
+    );
+
+    // A durable store remembers, so the same timing is accepted.
+    let path = std::env::temp_dir().join(format!(
+        "acf-gw-state-{}.sqlite",
+        NEXT_REQUEST.fetch_add(1, Ordering::SeqCst)
+    ));
+    let durable: Arc<dyn StateStore> = Arc::new(SqliteStateStore::open(&path).unwrap());
+    let h = Setup {
+        started_at: Some(now()),
+        store: Some(durable),
+        ..Setup::new("dev-agent")
+    }
+    .build()
+    .await;
+    completes(&h, profile_get()).await;
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn revocation_takes_effect_on_the_next_request() {
+    let h = harness("dev-agent", Duration::ZERO, true).await;
+    completes(&h, profile_get()).await;
+    h.state
+        .revoke(Revocation {
+            target: RevocationTarget::Principal(PrincipalId::new("dev-agent").unwrap()),
+            revoked_at: now(),
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        denial(&h, profile_get()).await,
+        (DenialReason::CapabilityRevoked, Some("revoked".to_owned()))
+    );
+    assert_eq!(
+        h.events.lock().unwrap().len(),
+        2,
+        "the revoked request touched nothing"
+    );
+
+    // Revoking a different task does not affect this one.
+    let other = harness("dev-agent", Duration::ZERO, true).await;
+    other
+        .state
+        .revoke(Revocation {
+            target: RevocationTarget::Task(acf_protocol::TaskId::new("another-task").unwrap()),
+            revoked_at: now(),
+            expires_at: None,
+        })
+        .await
+        .unwrap();
+    completes(&other, profile_get()).await;
+}
+
+#[tokio::test]
+async fn task_quotas_are_enforced_before_retrieval() {
+    let h = Setup {
+        resource_constraints: Some("{ quotas: { requests_per_task: 2 } }"),
+        ..Setup::new("dev-agent")
+    }
+    .build()
+    .await;
+    completes(&h, profile_get()).await;
+    completes(&h, profile_get()).await;
+    assert_eq!(
+        denial(&h, profile_get()).await,
+        (
+            DenialReason::QuotaExceeded,
+            Some("quota_exceeded:task_requests".to_owned())
+        )
+    );
+    assert_eq!(
+        h.events.lock().unwrap().len(),
+        4,
+        "the third request touched nothing"
+    );
+}
+
+#[tokio::test]
+async fn per_principal_rate_limits_apply() {
+    let limits = RateLimits {
+        per_principal_per_minute: Some(1),
+        ..RateLimits::default()
+    };
+    let h = Setup {
+        rate_limits: limits,
+        ..Setup::new("dev-agent")
+    }
+    .build()
+    .await;
+    // Three requests span at most one minute boundary, so at least two share
+    // a window and one of them must be refused.
+    let mut refusals = Vec::new();
+    for _ in 0..3 {
+        let response = h
+            .gateway
+            .execute(&ConnectionInfo::default(), profile_get())
+            .await;
+        if let ActionResponse::Denied { reason, .. } = response {
+            refusals.push((
+                reason,
+                h.audit.events().last().and_then(|e| e.reason.clone()),
+            ));
+        }
+    }
+    assert!(!refusals.is_empty());
+    for refusal in refusals {
+        assert_eq!(
+            refusal,
+            (
+                DenialReason::QuotaExceeded,
+                Some("quota_exceeded:principal_rate".to_owned())
+            )
+        );
+    }
+}
+
+struct BrokenState;
+
+#[async_trait]
+impl StateStore for BrokenState {
+    fn replay_is_durable(&self) -> bool {
+        true
+    }
+    async fn record_request(
+        &self,
+        _: &PrincipalId,
+        _: &acf_protocol::RequestId,
+        _: i64,
+        _: i64,
+    ) -> Result<(), acf_state::StateError> {
+        Err(acf_state::StateError::Unavailable)
+    }
+    async fn revoke(&self, _: Revocation) -> Result<u64, acf_state::StateError> {
+        Err(acf_state::StateError::Unavailable)
+    }
+    async fn is_revoked(
+        &self,
+        _: &acf_state::RevocationQuery<'_>,
+    ) -> Result<bool, acf_state::StateError> {
+        Err(acf_state::StateError::Unavailable)
+    }
+    async fn revocations_since(
+        &self,
+        _: u64,
+        _: usize,
+    ) -> Result<Vec<acf_state::RevocationRecord>, acf_state::StateError> {
+        Err(acf_state::StateError::Unavailable)
+    }
+    async fn charge(&self, _: &[acf_state::Charge], _: i64) -> Result<(), acf_state::StateError> {
+        Err(acf_state::StateError::Unavailable)
+    }
+}
+
+#[tokio::test]
+async fn an_unavailable_state_store_fails_closed() {
+    let h = Setup {
+        store: Some(Arc::new(BrokenState)),
+        ..Setup::new("dev-agent")
+    }
+    .build()
+    .await;
+    assert_eq!(
+        denial(&h, profile_get()).await,
+        (
+            DenialReason::Unavailable,
+            Some("state_unavailable".to_owned())
+        )
+    );
+    assert!(h.events.lock().unwrap().is_empty());
 }

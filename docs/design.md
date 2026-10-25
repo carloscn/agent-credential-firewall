@@ -915,7 +915,9 @@ A misconfigured or malicious resource registration therefore cannot send a crede
 
 Every request also carries a timestamp. The gateway rejects a request whose timestamp is outside the freshness window. The replay window covers the freshness window plus the allowed clock skew.
 
-A single-node gateway that restarts without a durable replay cache must reject requests timestamped before its start time plus the freshness window.
+A gateway whose replay cache does not survive a restart must reject requests timestamped at or before its start time plus the allowed clock skew. The previous process accepted only timestamps up to its last moment plus the skew, so this rejects every request it could have seen and nothing newer. A durable replay cache needs no such rule. The development gateway always uses a durable store.
+
+Until capability-scoped tasks arrive (WP-09), the agent chooses its `taskId`, so per-task quotas bound only a cooperating agent. Per-principal rate limits apply regardless.
 
 ### 9.2 Operation states
 

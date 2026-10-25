@@ -18,11 +18,14 @@ mod development {
     use acf_audit::{AuditHasher, GatewayInfo, JsonLinesSink};
     use acf_config::{DeploymentProfile, SecretProviderConfig, load_yaml};
     use acf_connectors::{HttpConnector, HttpLimits, NetworkPolicy, SystemResolver};
-    use acf_gateway::{AuditSettings, Gateway, ProviderRegistry, ServerLimits, router};
+    use acf_gateway::{
+        AuditSettings, Gateway, ProviderRegistry, RateLimits, ServerLimits, StateSettings, router,
+    };
     use acf_identity::DevelopmentIdentityProvider;
     use acf_policy::{Authorizer, AuthorizerSettings};
     use acf_protocol::{AudienceId, PrincipalId};
     use acf_secrets::{InMemoryProvider, SecretAdmin, SecretMaterial, SecretRef};
+    use acf_state::SqliteStateStore;
     use clap::Parser;
 
     /// Development gateway (Milestone 0).
@@ -54,6 +57,18 @@ mod development {
         /// Gateway identifier recorded in audit events.
         #[arg(long, default_value = "acf-gateway-dev")]
         gateway_id: String,
+        /// Durable state database (replay cache, revocations, counters).
+        #[arg(long)]
+        state_db: PathBuf,
+        /// Requests per principal per minute.
+        #[arg(long)]
+        rate_limit_principal: Option<u32>,
+        /// Requests per resource per minute.
+        #[arg(long)]
+        rate_limit_resource: Option<u32>,
+        /// Requests per action per minute.
+        #[arg(long)]
+        rate_limit_action: Option<u32>,
     }
 
     pub(crate) async fn run() -> Result<(), String> {
@@ -133,7 +148,18 @@ mod development {
             .map_err(|e| e.to_string())?,
         );
         let audit = audit_settings(args.audit_log.as_ref(), args.gateway_id)?;
-        let gateway = Gateway::new(authorizer, identity, registry, connector, audit)
+        let store = SqliteStateStore::open(&args.state_db)
+            .map_err(|_| format!("cannot open state database {}", args.state_db.display()))?;
+        let mut state = StateSettings::new(
+            Arc::new(store),
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        );
+        state.rate_limits = RateLimits {
+            per_principal_per_minute: args.rate_limit_principal,
+            per_resource_per_minute: args.rate_limit_resource,
+            per_action_per_minute: args.rate_limit_action,
+        };
+        let gateway = Gateway::new(authorizer, identity, registry, connector, audit, state)
             .map_err(|e| e.to_string())?;
 
         let listener = tokio::net::TcpListener::bind(args.listen)

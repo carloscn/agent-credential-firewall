@@ -430,7 +430,7 @@ Deliverables:
 Acceptance criteria:
 
 - Reusing a `requestId` is denied.
-- After a restart without a durable replay cache, requests timestamped before start time plus the freshness window are rejected.
+- After a restart without a durable replay cache, requests timestamped at or before start time plus the allowed clock skew are rejected.
 - Revocation and quota updates take effect within a documented, bounded latency.
 
 #### WP-11 — Config Registry and production profile
