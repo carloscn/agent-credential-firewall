@@ -11,13 +11,21 @@ repository.workspace = true
 # Fixed development identity. Release builds must not enable it, and the
 # authorizer rejects its assurance level under the `production` profile.
 development = []
+# TLS 1.3 + mTLS listener for the gateway and the Capability Authority.
+tls = ["dep:axum", "dep:hyper", "dep:hyper-util", "dep:rustls", "dep:tokio", "dep:tokio-rustls"]
 
 [dependencies]
 acf-protocol.workspace = true
 async-trait.workspace = true
+axum = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
 ring.workspace = true
+rustls = { workspace = true, optional = true }
 serde.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio.workspace = true

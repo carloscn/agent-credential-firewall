@@ -1,7 +1,7 @@
 //! Task capability claims (design §8.2).
 //!
-//! The wire encoding and signature format are fixed in a later ADR (WP-09).
-//! This module defines only the claims.
+//! The wire encoding and signature format are in ADR 0003 and
+//! [`crate::split_capability`]. This module defines only the claims.
 
 use serde::{Deserialize, Serialize};
 

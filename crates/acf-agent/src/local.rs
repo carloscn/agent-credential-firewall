@@ -59,7 +59,7 @@ fn decode<T: DeserializeOwned>(status: u16, bytes: &[u8]) -> Result<T, AgentErro
     }
 }
 
-/// Opens a task; `pid` restricts the handle to that process.
+/// Opens an unscoped task; `pid` restricts the handle to that process.
 ///
 /// # Errors
 ///
@@ -69,11 +69,27 @@ pub async fn create_task(
     task: &str,
     pid: Option<u32>,
 ) -> Result<TaskStatus, AgentError> {
-    let body = serde_json::to_vec(&CreateTaskRequest {
+    let request = CreateTaskRequest {
         task_id: TaskId::new(task)?,
         pid,
-    })
-    .map_err(|_| AgentError::InvalidParam)?;
+        basis: None,
+        grants: Vec::new(),
+        ttl_secs: None,
+    };
+    propose_task(socket, &request).await
+}
+
+/// Opens a task as described by `request`. With an authority behind the
+/// daemon, the scope in `request` is a proposal the authority narrows.
+///
+/// # Errors
+///
+/// Returns [`AgentError`] if the daemon is unreachable or refuses.
+pub async fn propose_task(
+    socket: &Path,
+    request: &CreateTaskRequest,
+) -> Result<TaskStatus, AgentError> {
+    let body = serde_json::to_vec(request).map_err(|_| AgentError::InvalidParam)?;
     let (status, bytes) = call(socket, Method::POST, "/v1/tasks", body).await?;
     decode(status, &bytes)
 }

@@ -1,0 +1,10 @@
+# An administrator-approved job: vps-17 may read its profile, at most 20
+# times per capability, for at most 15 minutes. Sign it before use:
+#   acf-control-plane sign-job --key admin.key --kid admin-1 profile-check.yaml
+schema: acf.job/v1
+id: profile-check
+principals: ["workload:vps-17"]
+ttl_secs: 900
+limits: { maxRequests: 20 }
+grants:
+  - { action: example.profile.get, resource: "example-api:development" }

@@ -15,7 +15,9 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::Mutex;
 
-use acf_protocol::{ActionName, DeviceId, PrincipalId, RequestId, ResourceId, TaskId};
+use acf_protocol::{
+    ActionName, CapabilityId, DeviceId, PrincipalId, RequestId, ResourceId, TaskId,
+};
 use async_trait::async_trait;
 use ring::hmac;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -114,6 +116,9 @@ pub struct AuditEvent {
     /// Device, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device: Option<DeviceId>,
+    /// Capability `jti`, for capability-scoped tasks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capability: Option<CapabilityId>,
     /// Requested action.
     pub action: ActionName,
     /// Requested resource.
@@ -165,6 +170,7 @@ impl AuditEvent {
             task_id,
             principal: None,
             device: None,
+            capability: None,
             action,
             resource,
             verdict,

@@ -17,6 +17,7 @@ acf-audit = { path = "crates/acf-audit" }
 acf-config = { path = "crates/acf-config" }
 acf-connectors = { path = "crates/acf-connectors" }
 acf-control-plane = { path = "crates/acf-control-plane" }
+acf-e2e = { path = "crates/acf-e2e" }
 acf-gateway = { path = "crates/acf-gateway" }
 acf-identity = { path = "crates/acf-identity" }
 acf-policy = { path = "crates/acf-policy" }
@@ -32,6 +33,7 @@ acf-state = { path = "crates/acf-state" }
 # licenses, and sources.
 async-trait = "0.1.92"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
+base64 = { version = "0.23.1", default-features = false, features = ["alloc"] }
 clap = { version = "4.6.7", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
 getrandom = "0.4.3"
 http-body-util = "0.1.5"

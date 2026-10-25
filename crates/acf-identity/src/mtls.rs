@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 
-use acf_protocol::{CertificateThumbprint, DeviceId, IssuerId, PrincipalId};
+use acf_protocol::{CertificateThumbprint, DeviceId, IssuerId, PrincipalId, base64url_encode};
 use async_trait::async_trait;
 use serde::Deserialize;
 
@@ -23,25 +23,10 @@ pub const DEVICE_REGISTRY_SCHEMA: &str = "acf.devices/v1";
 /// SHA-256 digest.
 #[must_use]
 pub fn thumbprint(certificate_der: &[u8]) -> CertificateThumbprint {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let digest = ring::digest::digest(&ring::digest::SHA256, certificate_der);
-    let bytes = digest.as_ref();
-    let mut encoded = String::with_capacity(43);
-    for chunk in bytes.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-        let symbols = chunk.len() + 1;
-        for i in 0..symbols {
-            let index = (n >> (18 - 6 * i)) & 0x3f;
-            encoded.push(char::from(ALPHABET[index as usize]));
-        }
-    }
     // 32 bytes always encode to a well-formed 43-character thumbprint.
-    CertificateThumbprint::parse(encoded).unwrap_or_else(|_| unreachable!())
+    CertificateThumbprint::parse(base64url_encode(digest.as_ref()))
+        .unwrap_or_else(|_| unreachable!())
 }
 
 /// One enrolled device.
@@ -178,6 +163,41 @@ impl IdentityContextProvider for MtlsIdentityProvider {
             issuer: self.issuer.clone(),
             assurance: IdentityAssurance::Production,
         })
+    }
+}
+
+/// How often [`watch_registry`] checks the registry file for changes.
+#[cfg(feature = "tls")]
+pub const REGISTRY_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Reloads `provider`'s registry from `path` whenever the file's
+/// modification time changes. `parse` turns the file text into a registry;
+/// an unreadable or invalid file is reported and the current registry stays
+/// in force. Runs until cancelled.
+#[cfg(feature = "tls")]
+pub async fn watch_registry(
+    provider: Arc<MtlsIdentityProvider>,
+    path: std::path::PathBuf,
+    parse: impl Fn(&str) -> Result<DeviceRegistry, String>,
+    report: impl Fn(&str),
+) {
+    let modified = |path: &std::path::Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    let mut last = modified(&path);
+    loop {
+        tokio::time::sleep(REGISTRY_POLL).await;
+        let current = modified(&path);
+        if current == last {
+            continue;
+        }
+        last = current;
+        let reloaded = std::fs::read_to_string(&path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))
+            .and_then(|text| parse(&text))
+            .and_then(|registry| provider.replace(registry).map_err(|e| e.to_string()));
+        match reloaded {
+            Ok(()) => report("device registry reloaded"),
+            Err(error) => report(&format!("device registry not reloaded: {error}")),
+        }
     }
 }
 

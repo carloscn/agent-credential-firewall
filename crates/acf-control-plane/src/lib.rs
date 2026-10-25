@@ -1,4 +1,29 @@
-//! Capability Authority and Approval Service.
+//! Capability Authority (WP-09). The Approval Service arrives with WP-13.
 //!
-//! Implemented by WP-09, WP-13 in `docs/implementation-plan.md`. This is a WP-00
-//! skeleton with no behavior yet.
+//! - [`Authority`] intersects a daemon's task proposal with the caller's
+//!   entitlements, the scope of a trusted authorization basis (a signed job
+//!   definition or a configured scheduler), and the registered actions, then
+//!   signs a certificate-bound capability (ADR 0003).
+//! - [`router`] serves `POST /v1/tasks`; the caller's identity comes from
+//!   its verified client certificate (ADR 0002).
+//!
+//! This is the only crate that can sign capabilities. Gateways verify them
+//! with public keys alone, and `deny.toml` keeps them from linking this
+//! crate.
+
+mod authority;
+mod config;
+mod http;
+mod keys;
+
+pub use authority::{Authority, Issuance};
+pub use config::{
+    AUTHORITY_SCHEMA, AuthorityConfig, AuthorityConfigError, AuthorityPolicy, Entitlement,
+    JOB_SCHEMA, JobDefinition, JobFile, JobSigner, MAX_TTL_SECS, Scheduler, SignedJob, read_jobs,
+    sha256,
+};
+pub use http::{MAX_PROPOSAL_BYTES, router};
+pub use keys::{
+    CapabilitySigner, DetachedSignature, KeyError, generate_pem, parse_key_pair, public_key,
+    read_key_pair, sign_detached, verify_detached,
+};

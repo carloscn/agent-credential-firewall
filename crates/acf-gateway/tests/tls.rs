@@ -467,7 +467,7 @@ async fn the_daemon_forwards_agent_requests_over_mtls() {
     let socket = daemon::bind(&dir.join("acf.sock"), daemon::DEFAULT_SOCKET_MODE).unwrap();
     let path = socket.path().to_owned();
     let allowed = std::collections::BTreeSet::from([socket.owner()]);
-    tokio::spawn(daemon::serve(socket, allowed, daemon::router(client)));
+    tokio::spawn(daemon::serve(socket, allowed, daemon::router(client, None)));
 
     let task = local::create_task(&path, "daemon-task", None)
         .await

@@ -1,0 +1,15 @@
+# WP-09 demo: Capability Authority configuration (acf.authority/v1).
+# ADMIN_PUBLIC_KEY is replaced by the demo with the job signer's public key.
+schema: acf.authority/v1
+issuer: acf-authority-dev
+audience: acf-gateway-dev
+default_ttl_secs: 900
+max_ttl_secs: 3600
+# What each principal may ever be granted.
+entitlements:
+  - principal: "workload:vps-17"
+    grants:
+      - { action: example.profile.get, resource: "example-api:development" }
+# Keys trusted to sign job definitions.
+job_signers:
+  - { kid: admin-1, public_key: ADMIN_PUBLIC_KEY }

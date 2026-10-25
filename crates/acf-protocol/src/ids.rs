@@ -166,6 +166,16 @@ define_id!(
     validate_opaque
 );
 define_id!(
+    /// Signing key identifier (JWS `kid`).
+    KeyId,
+    validate_opaque
+);
+define_id!(
+    /// Administrator-approved job definition.
+    JobId,
+    validate_opaque
+);
+define_id!(
     /// Capability `jti`. Identifies one task authorization; reusable within its TTL.
     CapabilityId,
     validate_opaque

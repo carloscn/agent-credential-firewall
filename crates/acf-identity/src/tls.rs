@@ -1,13 +1,14 @@
-//! TLS 1.3 listener with mandatory client certificates (ADR 0002).
+//! TLS 1.3 listener with mandatory client certificates (ADR 0002), shared by
+//! the gateway and the Capability Authority.
 //!
-//! The gateway terminates TLS itself. The verified leaf certificate's
+//! The service terminates TLS itself. The verified leaf certificate's
 //! thumbprint is attached to every request on the connection as
 //! [`ConnectionInfo`]; nothing a client sends in HTTP can change it.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use acf_identity::{ConnectionInfo, thumbprint};
+use crate::{ConnectionInfo, thumbprint};
 use axum::{Extension, Router};
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;

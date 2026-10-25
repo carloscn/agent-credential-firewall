@@ -1,4 +1,4 @@
-# WP-08 demo: daemon and mTLS
+# Milestone 1 demo: daemon, mTLS, and task capabilities
 
 The same `example.profile.get` read as the [Milestone 0 demo](../m0/README.md), with three changes:
 
@@ -51,6 +51,59 @@ The result is the same as in M0. The audit log's decision event now records `"pr
 - Replace the thumbprint in `devices.yaml` and wait 5 seconds. The next action is denied with `unauthenticated`, because the certificate still chains to the CA but is no longer enrolled. Put the thumbprint back to restore access. Rotation works the same way: list both thumbprints, switch the daemon to the new certificate, then remove the old one.
 - `chmod 640 "$PKI/vps-17.key"` and restart the daemon. It refuses to start.
 - Run `acf-agent task create --pid 1 …` and use the handle from your shell. The daemon answers `unknown_task`: the handle is bound to PID 1.
+
+## Task capabilities (WP-09)
+
+Add a Capability Authority, and the gateway refuses any request without a capability it signed ([ADR 0003](../../docs/adr/0003-capability-wire-encoding.md)). Continuing from the shell above, after stopping the gateway and the daemon:
+
+```bash
+cargo build -p acf-control-plane
+
+# Keys: one to sign job definitions (an administrator's), one for the authority.
+target/debug/acf-control-plane keygen --out "$PKI/admin.key" > "$PKI/admin.pub"
+target/debug/acf-control-plane keygen --out "$PKI/authority.key" > /dev/null
+sed "s/ADMIN_PUBLIC_KEY/$(cat "$PKI/admin.pub")/" examples/m1/authority.yaml > "$PKI/authority.yaml"
+
+# An administrator signs the job definition; the authority refuses unsigned jobs.
+mkdir -p "$PKI/jobs" && cp examples/m1/jobs/profile-check.yaml "$PKI/jobs/"
+target/debug/acf-control-plane sign-job --key "$PKI/admin.key" --kid admin-1 "$PKI/jobs/profile-check.yaml"
+
+# Gateways get only the public key.
+target/debug/acf-control-plane trust-entry --signing-key "$PKI/authority.key" \
+  --kid authority-1 --issuer acf-authority-dev > "$PKI/authority-keys.yaml"
+
+target/debug/acf-control-plane serve \
+  --authority-config "$PKI/authority.yaml" --bundle examples/m0/config.yaml --jobs "$PKI/jobs" \
+  --signing-key "$PKI/authority.key" --kid authority-1 --listen 127.0.0.1:8444 \
+  --tls-cert "$PKI/gateway.pem" --tls-key "$PKI/gateway.key" \
+  --client-ca "$PKI/ca.pem" --devices "$PKI/devices.yaml" &
+
+target/debug/acf-gateway \
+  --config examples/m0/config.yaml --policy examples/m1/policy.yaml \
+  --tls-cert "$PKI/gateway.pem" --tls-key "$PKI/gateway.key" \
+  --client-ca "$PKI/ca.pem" --devices "$PKI/devices.yaml" \
+  --authority-keys "$PKI/authority-keys.yaml" \
+  --secret-env secret://development/example-api/read=DEMO_TOKEN \
+  --audit-log /tmp/acf-m1-audit.jsonl --state-db /tmp/acf-m1-state.sqlite &
+
+target/debug/acf-agent daemon \
+  --socket "$RUN/acf.sock" \
+  --gateway https://localhost:8443 --authority https://localhost:8444 \
+  --client-cert "$PKI/vps-17.pem" --client-key "$PKI/vps-17.key" \
+  --gateway-ca "$PKI/ca.pem" &
+
+# The agent proposes a task under the signed job and gets a handle.
+HANDLE=$(target/debug/acf-agent task create --socket "$RUN/acf.sock" --task demo-task --job profile-check \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["taskHandle"])')
+target/debug/acf-agent action execute --socket "$RUN/acf.sock" --task-handle "$HANDLE" \
+  --action example.profile.get --resource example-api:development
+```
+
+- `task create` prints the handle, the effective grants, the limits (`maxRequests: 20` from the job), and the expiry. It never prints the capability, which stays in the daemon.
+- The handle works for many requests until the capability expires or reaches its limit. Each audit event records the capability's `jti`.
+- `--grant example.records.create@example-api:development` proposes more than vps-17 is entitled to. Nothing survives the intersection, so the authority refuses with `scope_empty`.
+- Without `--job`, the daemon refuses to open a task, because it cannot be scoped. A daemon started without `--authority` opens unscoped tasks, and this gateway rejects their requests with `capability_invalid`.
+- Edit the job file without re-signing it, and the authority refuses to start.
 
 ## Production topology
 

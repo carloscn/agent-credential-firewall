@@ -79,6 +79,7 @@ pub(crate) async fn admit(
     settings: &StateSettings,
     identity: &IdentityContext,
     request: &ActionRequest,
+    capability: Option<(&CapabilityId, i64)>,
     now: i64,
 ) -> Result<(), Refusal> {
     let timestamp = request.timestamp.unix_timestamp();
@@ -105,8 +106,7 @@ pub(crate) async fn admit(
         principal: &identity.principal,
         device: identity.device.as_ref(),
         task: &request.task_id,
-        // Capability-scoped tasks arrive with WP-09.
-        capability: None,
+        capability,
         now,
     };
     match settings.store.is_revoked(&query).await {
