@@ -1,14 +1,26 @@
 //! Endpoint and VPS daemon and its CLI.
 //!
-//! Milestone 0 provides a development CLI that sends one semantic action to
-//! a gateway. It can name only an action, a resource, a task, and parameter
-//! values; the request model has no field for a URL, method, header, or
-//! secret. The isolated daemon arrives with WP-08.
+//! - [`daemon`]: the local daemon. It serves agents on a permissioned Unix
+//!   socket and forwards their semantic requests to the gateway over mTLS
+//!   (ADR 0002).
+//! - [`local`]: the client side of that socket, used by the CLI.
+//! - [`send`]: the Milestone 0 development path straight to a plaintext
+//!   loopback gateway.
+//!
+//! An agent can name only an action, a resource, a task, and parameter
+//! values; no request model has a field for a URL, method, header, or
+//! secret.
+
+pub mod daemon;
+pub mod gateway;
+pub mod local;
+pub mod tasks;
 
 use std::fmt::Write as _;
 
 use acf_protocol::{
-    ActionName, ActionRequest, ActionResponse, IdError, RequestId, ResourceId, TaskId,
+    ActionName, ActionRequest, ActionResponse, IdError, LocalActionRequest, LocalErrorCode,
+    RequestId, ResourceId, TaskHandle, TaskId,
 };
 use serde_json::{Map, Value};
 use time::OffsetDateTime;
@@ -34,9 +46,22 @@ pub enum AgentError {
     /// The gateway could not be reached.
     #[error("gateway unreachable")]
     Transport,
-    /// The gateway answered with something other than an action response.
-    #[error("gateway returned an unexpected response (HTTP {0})")]
+    /// The gateway or daemon answered with something unexpected.
+    #[error("unexpected response (HTTP {0})")]
     UnexpectedResponse(u16),
+    /// The daemon socket could not be reached.
+    #[error("daemon unreachable")]
+    DaemonUnreachable,
+    /// The daemon refused the call.
+    #[error("daemon refused the call: {}", code_name(*.0))]
+    Daemon(LocalErrorCode),
+}
+
+fn code_name(code: LocalErrorCode) -> String {
+    serde_json::to_value(code)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 /// Parses `key=value`. The value is JSON if it parses as JSON, otherwise a
@@ -69,7 +94,39 @@ pub fn new_request_id() -> Result<RequestId, AgentError> {
     Ok(RequestId::new(format!("req-{hex}"))?)
 }
 
-/// Builds a semantic action request.
+fn parse_params(params: &[String]) -> Result<Map<String, Value>, AgentError> {
+    let mut parameters = Map::new();
+    for argument in params {
+        let (key, value) = parse_param(argument)?;
+        if parameters.insert(key.clone(), value).is_some() {
+            return Err(AgentError::DuplicateParam(key));
+        }
+    }
+    Ok(parameters)
+}
+
+/// Builds a semantic action request for the daemon.
+///
+/// # Errors
+///
+/// Returns [`AgentError`] for malformed identifiers or parameters.
+pub fn build_local_request(
+    action: &str,
+    resource: &str,
+    task_handle: &str,
+    params: &[String],
+) -> Result<LocalActionRequest, AgentError> {
+    Ok(LocalActionRequest {
+        task_handle: TaskHandle::new(task_handle)?,
+        action: ActionName::new(action)?,
+        resource: ResourceId::new(resource)?,
+        parameters: parse_params(params)?,
+        idempotency_key: None,
+        approval_id: None,
+    })
+}
+
+/// Builds a semantic action request for a development gateway.
 ///
 /// # Errors
 ///
@@ -80,13 +137,7 @@ pub fn build_request(
     task: &str,
     params: &[String],
 ) -> Result<ActionRequest, AgentError> {
-    let mut parameters = Map::new();
-    for argument in params {
-        let (key, value) = parse_param(argument)?;
-        if parameters.insert(key.clone(), value).is_some() {
-            return Err(AgentError::DuplicateParam(key));
-        }
-    }
+    let parameters = parse_params(params)?;
     Ok(ActionRequest {
         request_id: new_request_id()?,
         timestamp: OffsetDateTime::now_utc(),

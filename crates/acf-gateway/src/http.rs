@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use acf_identity::ConnectionInfo;
 use acf_protocol::{ActionRequest, ActionResponse, DenialReason, FailureReason};
+use axum::Extension;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, State};
@@ -61,7 +62,11 @@ async fn healthz() -> Response {
     json_response(StatusCode::OK, &serde_json::json!({ "status": "ok" }))
 }
 
-async fn execute(State(state): State<AppState>, body: Bytes) -> Response {
+async fn execute(
+    State(state): State<AppState>,
+    connection: Option<Extension<ConnectionInfo>>,
+    body: Bytes,
+) -> Response {
     let Ok(request) = serde_json::from_slice::<ActionRequest>(&body) else {
         return json_response(
             StatusCode::BAD_REQUEST,
@@ -69,8 +74,9 @@ async fn execute(State(state): State<AppState>, body: Bytes) -> Response {
         );
     };
     let request_id = request.request_id.clone();
-    // M0 listens on plaintext loopback; TLS client identity arrives with WP-08.
-    let connection = ConnectionInfo::default();
+    // Set by the TLS listener from the verified client certificate; absent
+    // on the plaintext development listener. Never derived from headers.
+    let connection = connection.map(|Extension(c)| c).unwrap_or_default();
     let response = tokio::time::timeout(
         state.limits.request_timeout,
         state.gateway.execute(&connection, request),

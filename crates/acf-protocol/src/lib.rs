@@ -10,6 +10,7 @@ mod capability;
 mod constraints;
 mod digest;
 mod ids;
+mod local;
 mod operation;
 
 pub use action::{ActionRequest, ActionResponse, DenialReason, FailureReason};
@@ -25,6 +26,10 @@ pub use constraints::{
 pub use digest::{CertificateThumbprint, DigestError, Sha256Digest};
 pub use ids::{
     ActionName, AgentId, ApprovalId, ApprovalNonce, AudienceId, CapabilityId, DeviceId, IdError,
-    IdempotencyKey, IssuerId, MAX_ID_LEN, OperationId, PrincipalId, RequestId, ResourceId, TaskId,
+    IdempotencyKey, IssuerId, MAX_ID_LEN, OperationId, PrincipalId, RequestId, ResourceId,
+    TaskHandle, TaskId,
+};
+pub use local::{
+    CreateTaskRequest, LocalActionRequest, LocalError, LocalErrorCode, TaskState, TaskStatus,
 };
 pub use operation::{OperationState, OperationStatus};

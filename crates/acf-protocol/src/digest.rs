@@ -78,7 +78,7 @@ impl fmt::Display for Sha256Digest {
 
 /// SHA-256 thumbprint of a DER-encoded X.509 certificate, unpadded base64url,
 /// as used by the RFC 8705 `x5t#S256` confirmation claim.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct CertificateThumbprint(String);
 

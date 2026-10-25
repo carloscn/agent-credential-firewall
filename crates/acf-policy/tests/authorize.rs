@@ -440,7 +440,7 @@ fn policy_is_validated_against_configuration() {
 }
 
 #[test]
-fn development_tasks_need_development_profile_and_identity() {
+fn unscoped_tasks_need_the_development_profile() {
     let policy = r"
 schema: acf.policy/v1
 version: dev.1
@@ -475,13 +475,12 @@ rules:
     };
     request(&dev_identity).unwrap();
 
-    // An unscoped task with a production identity is still refused.
+    // In the development profile an mTLS (production-assurance) identity may
+    // also use unscoped tasks; the production profile refuses them (see
+    // `each_layer_denies_on_its_own`).
     let mut prod_identity = dev_identity.clone();
     prod_identity.assurance = IdentityAssurance::Production;
-    assert_eq!(
-        request(&prod_identity).unwrap_err(),
-        DecisionReason::DevelopmentTaskRejected
-    );
+    request(&prod_identity).unwrap();
 
     // Policy still applies to unscoped development tasks.
     let mut stranger = dev_identity;

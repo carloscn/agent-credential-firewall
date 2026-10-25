@@ -1,0 +1,9 @@
+# WP-08 demo policy: the enrolled device vps-17 may read its profile.
+schema: acf.policy/v1
+version: m1-mtls-demo.1
+rules:
+  - id: vps-17-profile
+    effect: allow
+    principals: ["workload:vps-17"]
+    actions: [example.profile.get]
+    resources: ["example-api:development"]

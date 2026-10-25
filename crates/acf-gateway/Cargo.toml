@@ -15,11 +15,15 @@ development = ["acf-secrets/in-memory", "acf-identity/development"]
 [dependencies]
 axum.workspace = true
 clap.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 acf-audit.workspace = true
 acf-config.workspace = true
 acf-connectors.workspace = true
@@ -31,6 +35,8 @@ acf-secrets.workspace = true
 acf-state.workspace = true
 
 [dev-dependencies]
+rcgen.workspace = true
+acf-agent.workspace = true
 acf-identity = { workspace = true, features = ["development"] }
 acf-secrets = { workspace = true, features = ["in-memory"] }
 async-trait.workspace = true
@@ -43,6 +49,14 @@ required-features = ["development"]
 
 [[test]]
 name = "leak"
+required-features = ["development"]
+
+[[test]]
+name = "tls"
+required-features = ["development"]
+
+[[example]]
+name = "dev-pki"
 required-features = ["development"]
 
 [lints]

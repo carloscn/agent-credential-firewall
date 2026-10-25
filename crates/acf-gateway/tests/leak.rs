@@ -158,9 +158,29 @@ fn action(name: &str, params: &Value) -> Vec<u8> {
     .unwrap()
 }
 
+/// The gateway process, killed on drop so a failing test cannot orphan it.
+struct GatewayProcess(Option<Child>);
+
+impl GatewayProcess {
+    fn stop(mut self) -> std::process::Output {
+        let mut child = self.0.take().unwrap();
+        child.kill().unwrap();
+        child.wait_with_output().unwrap()
+    }
+}
+
+impl Drop for GatewayProcess {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 /// Starts the gateway binary with the canary in its environment and waits
 /// until it answers. Returns the process, its base URL, and the audit log path.
-async fn spawn_gateway(upstream: u16) -> (Child, String, PathBuf, PathBuf) {
+async fn spawn_gateway(upstream: u16) -> (GatewayProcess, String, PathBuf, PathBuf) {
     let dir = scratch_dir();
     let config = dir.join("config.yaml");
     let policy = dir.join("policy.yaml");
@@ -193,6 +213,7 @@ async fn spawn_gateway(upstream: u16) -> (Child, String, PathBuf, PathBuf) {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    let gateway = GatewayProcess(Some(gateway));
 
     let base = format!("http://127.0.0.1:{port}");
     let client = reqwest::Client::new();
@@ -265,11 +286,10 @@ async fn drive(base: &str) -> (String, Vec<(&'static str, u16, u16)>) {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_canary_never_reaches_any_output_surface() {
     let upstream = echoing_upstream().await;
-    let (mut gateway, base, audit, dir) = spawn_gateway(upstream).await;
+    let (gateway, base, audit, dir) = spawn_gateway(upstream).await;
     let (surfaces, statuses) = drive(&base).await;
 
-    gateway.kill().unwrap();
-    let output = gateway.wait_with_output().unwrap();
+    let output = gateway.stop();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let audit_log = std::fs::read_to_string(&audit).unwrap();

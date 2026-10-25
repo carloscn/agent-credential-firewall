@@ -5,7 +5,8 @@
 //! request headers or agent-supplied claims, so an agent cannot assert its own
 //! identity.
 //!
-//! The mTLS provider arrives with WP-08. The `development` feature provides
+//! [`MtlsIdentityProvider`] maps a TLS-verified client certificate to an
+//! enrolled device (ADR 0002). The `development` feature provides
 //! [`DevelopmentIdentityProvider`], which returns a fixed identity with
 //! [`IdentityAssurance::Development`]; the authorizer refuses that assurance
 //! level under the `production` deployment profile.
@@ -147,6 +148,12 @@ pub trait IdentityContextProvider: Send + Sync {
     /// Returns [`IdentityError`] when no trusted identity can be established.
     async fn resolve(&self, connection: &ConnectionInfo) -> Result<IdentityContext, IdentityError>;
 }
+
+mod mtls;
+pub use mtls::{
+    DEVICE_REGISTRY_SCHEMA, DeviceEntry, DeviceRegistry, MtlsIdentityProvider, RegistryError,
+    thumbprint,
+};
 
 #[cfg(feature = "development")]
 mod development;
