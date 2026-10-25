@@ -309,6 +309,8 @@ A recovery test must prove that operators can:
 
 Backup documentation must state that losing the only key source makes the encrypted store unrecoverable.
 
+Detailed host-to-host, re-key, snapshot, and cross-provider migration behavior is specified in [Local Provider Data Migration](local-migration.md).
+
 ## 11. Failure behavior
 
 The provider fails closed when:
