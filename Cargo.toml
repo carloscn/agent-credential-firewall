@@ -20,6 +20,7 @@ acf-control-plane = { path = "crates/acf-control-plane" }
 acf-gateway = { path = "crates/acf-gateway" }
 acf-identity = { path = "crates/acf-identity" }
 acf-policy = { path = "crates/acf-policy" }
+acf-provider-bitwarden = { path = "crates/acf-provider-bitwarden" }
 acf-protocol = { path = "crates/acf-protocol" }
 acf-provider-local = { path = "crates/acf-provider-local" }
 acf-secrets = { path = "crates/acf-secrets" }
@@ -32,6 +33,7 @@ acf-state = { path = "crates/acf-state" }
 # licenses, and sources.
 async-trait = "0.1.92"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
+bitwarden-sm = "=4.0.0"
 clap = { version = "4.6.7", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
 getrandom = "0.4.3"
 http-body-util = "0.1.5"
@@ -49,7 +51,9 @@ serde-saphyr = { version = "1.3.0", default-features = false, features = ["deser
 thiserror = "2.0.21"
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs"] }
 time = { version = "0.3.55", features = ["serde", "formatting", "parsing"] }
+tracing = "0.1.44"
 url = "2.5.8"
+uuid = "1.18.1"
 zeroize = "1.9.1"
 tokio = { version = "1.53.3", features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time", "signal"] }
 

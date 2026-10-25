@@ -56,9 +56,10 @@ Every crate in this workspace handles secrets, identity, authorization, or audit
 | `acf-connectors` | Semantic connectors and domain types | WP-04, WP-15 |
 | `acf-gateway` | Data-plane request lifecycle | WP-05 |
 | `acf-audit` | Redacted, tamper-evident audit events | WP-06, WP-12 |
+| `acf-provider-bitwarden` | Optional Bitwarden Secrets Manager adapter | External provider |
 | `acf-provider-local` | Encrypted local provider | WP-07 |
 | `acf-agent` | Endpoint/VPS daemon and CLI | WP-05, WP-08 |
 | `acf-control-plane` | Capability Authority and Approval Service | WP-09, WP-13 |
 | `acf-state` | Replay, revocation, quotas, receipts, journal | WP-10, WP-14 |
 
-`deny.toml` enforces part of the dependency direction. Only `acf-gateway` may depend on `acf-provider-local`, and OpenSSL-based TLS crates are banned.
+`deny.toml` enforces part of the dependency direction. Concrete providers are leaf adapters linked only by a composition root; core protocol, policy, connector, and state crates remain provider-neutral. OpenSSL-based TLS crates are banned.
