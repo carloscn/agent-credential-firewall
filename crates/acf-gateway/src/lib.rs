@@ -4,20 +4,19 @@
 //!   retrieval, and the connector.
 //! - [`router`] exposes it over HTTP.
 //!
-//! Milestone 0 serves plaintext loopback with a development identity, the
-//! in-memory provider, and unscoped development tasks. TLS client identity,
-//! capabilities, replay protection, and approvals arrive in later work
-//! packages; see `docs/implementation-plan.md`.
+//! The binary serves TLS 1.3 with client certificates (ADR 0002) and
+//! verifies task capabilities (ADR 0003). A plaintext loopback listener with
+//! a development identity remains for the `development` feature. Approvals
+//! arrive in later work packages; see `docs/implementation-plan.md`.
 
 mod http;
 mod pipeline;
 mod state;
-mod tls;
 
+pub use acf_identity::{HANDSHAKE_TIMEOUT, TlsError, serve_tls, server_config};
 pub use http::{ServerLimits, router};
 pub use pipeline::{AuditSettings, Gateway, GatewayError, ProviderRegistry};
 pub use state::{
     DEFAULT_CLOCK_SKEW_SECS, DEFAULT_FRESHNESS_SECS, DEFAULT_TASK_COUNTER_TTL_SECS, RateLimits,
     StateSettings,
 };
-pub use tls::{HANDSHAKE_TIMEOUT, TlsError, serve_tls, server_config};

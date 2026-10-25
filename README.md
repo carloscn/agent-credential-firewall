@@ -20,6 +20,8 @@ Milestone 1 is in progress:
 - WP-10 (done): replay protection, revocation, quotas, and rate limits, backed by SQLite.
 - WP-08 (done): the local daemon on a peer-credential Unix socket, plus TLS 1.3 mutual authentication with identity taken from an enrolled client certificate ([ADR 0002](docs/adr/0002-mtls-certificates-and-device-identity.md)). The demo is in [`examples/m1`](examples/m1/README.md).
 
+- WP-09 (done): the Capability Authority in `acf-control-plane`. It narrows a daemon's task proposal to the intersection of the caller's entitlements, a signed job definition or scheduler policy, and the registered actions. It then signs a certificate-bound capability (JWS, Ed25519; [ADR 0003](docs/adr/0003-capability-wire-encoding.md)). The gateway verifies it with public keys only, and the agent only ever holds a task handle.
+
 The gateway still runs only with the `development` feature and deployment profile until production validation (WP-11) lands.
 
 ## Development
@@ -60,5 +62,6 @@ Every crate in this workspace handles secrets, identity, authorization, or audit
 | `acf-agent` | Endpoint/VPS daemon and CLI | WP-05, WP-08 |
 | `acf-control-plane` | Capability Authority and Approval Service | WP-09, WP-13 |
 | `acf-state` | Replay, revocation, quotas, receipts, journal | WP-10, WP-14 |
+| `acf-e2e` | Test-only: daemon, authority, and gateway end to end | WP-09 |
 
 `deny.toml` enforces part of the dependency direction. Only `acf-gateway` may depend on `acf-provider-local`, and OpenSSL-based TLS crates are banned.

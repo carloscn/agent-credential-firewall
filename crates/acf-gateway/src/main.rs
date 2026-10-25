@@ -8,6 +8,9 @@
 //!   registry (ADR 0002).
 //! - **Plaintext loopback** (no TLS flags): a fixed development identity.
 //!
+//! With `--authority-keys`, every request must carry a task capability
+//! signed by one of those keys (ADR 0003).
+//!
 //! Development secrets are read from environment variables named on the
 //! command line; secret values are never accepted as arguments.
 
@@ -19,7 +22,6 @@ mod development {
     use std::net::SocketAddr;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    use std::time::{Duration, SystemTime};
 
     use acf_audit::{AuditHasher, GatewayInfo, JsonLinesSink};
     use acf_config::{
@@ -31,16 +33,14 @@ mod development {
         serve_tls, server_config,
     };
     use acf_identity::{
-        DevelopmentIdentityProvider, DeviceRegistry, IdentityContextProvider, MtlsIdentityProvider,
+        AuthorityKeys, CapabilityVerifier, DevelopmentIdentityProvider, DeviceRegistry,
+        IdentityContextProvider, MtlsIdentityProvider, watch_registry,
     };
     use acf_policy::{Authorizer, AuthorizerSettings};
     use acf_protocol::{AudienceId, IssuerId, PrincipalId};
     use acf_secrets::{InMemoryProvider, SecretAdmin, SecretMaterial, SecretRef};
     use acf_state::SqliteStateStore;
     use clap::Parser;
-
-    /// How often the device registry file is checked for changes.
-    const REGISTRY_POLL: Duration = Duration::from_secs(5);
 
     /// Development gateway.
     #[derive(Parser)]
@@ -70,6 +70,10 @@ mod development {
         /// Principal of the fixed development identity (plaintext mode).
         #[arg(long, default_value = "dev-agent", conflicts_with = "tls_cert")]
         principal: String,
+        /// Authority public keys (acf.authority-keys/v1). Requires a
+        /// capability on every request.
+        #[arg(long)]
+        authority_keys: Option<PathBuf>,
         /// This gateway's capability audience.
         #[arg(long, default_value = "acf-gateway-dev")]
         audience: String,
@@ -145,7 +149,7 @@ mod development {
             Identity::Development(provider) => provider.clone(),
             Identity::Mtls(provider, _) => provider.clone(),
         };
-        let gateway = Gateway::new(
+        let mut gateway = Gateway::new(
             authorizer,
             identity_provider,
             registry,
@@ -154,6 +158,11 @@ mod development {
             state,
         )
         .map_err(|e| e.to_string())?;
+        if let Some(path) = &args.authority_keys {
+            let keys: AuthorityKeys = parse_yaml(&read(path)?).map_err(|e| e.to_string())?;
+            gateway = gateway
+                .require_capabilities(CapabilityVerifier::new(keys).map_err(|e| e.to_string())?);
+        }
         let app = router(Arc::new(gateway), ServerLimits::default());
 
         let listener = tokio::net::TcpListener::bind(args.listen)
@@ -174,7 +183,12 @@ mod development {
                     &read_bytes(args.client_ca.as_deref().unwrap_or(Path::new("")))?,
                 )
                 .map_err(|e| e.to_string())?;
-                tokio::spawn(watch_registry(provider, devices));
+                tokio::spawn(watch_registry(
+                    provider,
+                    devices,
+                    |text| parse_yaml::<DeviceRegistry>(text).map_err(|e| e.to_string()),
+                    report,
+                ));
                 report(&format!(
                     "acf-gateway (development, mTLS) listening on https://{}",
                     args.listen
@@ -213,28 +227,6 @@ mod development {
             IssuerId::new(format!("{}-mtls", args.gateway_id)).map_err(|e| e.to_string())?;
         let provider = MtlsIdentityProvider::new(issuer, registry).map_err(|e| e.to_string())?;
         Ok(Identity::Mtls(Arc::new(provider), devices.clone()))
-    }
-
-    /// Reloads the device registry when its file changes. An invalid file is
-    /// reported and the current registry stays in force.
-    async fn watch_registry(provider: Arc<MtlsIdentityProvider>, path: PathBuf) {
-        let modified = |path: &Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
-        let mut last: Option<SystemTime> = modified(&path);
-        loop {
-            tokio::time::sleep(REGISTRY_POLL).await;
-            let current = modified(&path);
-            if current == last {
-                continue;
-            }
-            last = current;
-            let reloaded = read(&path)
-                .and_then(|text| parse_yaml::<DeviceRegistry>(&text).map_err(|e| e.to_string()))
-                .and_then(|registry| provider.replace(registry).map_err(|e| e.to_string()));
-            match reloaded {
-                Ok(()) => report("device registry reloaded"),
-                Err(error) => report(&format!("device registry not reloaded: {error}")),
-            }
-        }
     }
 
     async fn providers(

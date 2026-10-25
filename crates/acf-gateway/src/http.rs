@@ -1,5 +1,7 @@
 //! HTTP surface: `GET /healthz` and `POST /v1/actions/execute`.
 //!
+//! A task capability arrives in the `ACF-Capability` header (ADR 0003).
+//!
 //! Request bodies are parsed by the handler, not by an extractor, so a
 //! malformed request gets a fixed error body that never echoes its input.
 
@@ -7,12 +9,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use acf_identity::ConnectionInfo;
-use acf_protocol::{ActionRequest, ActionResponse, DenialReason, FailureReason};
+use acf_protocol::{
+    ActionRequest, ActionResponse, CAPABILITY_HEADER, DenialReason, FailureReason,
+    MAX_CAPABILITY_BYTES,
+};
 use axum::Extension;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 
@@ -65,13 +70,26 @@ async fn healthz() -> Response {
 async fn execute(
     State(state): State<AppState>,
     connection: Option<Extension<ConnectionInfo>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Ok(request) = serde_json::from_slice::<ActionRequest>(&body) else {
-        return json_response(
+    let invalid = || {
+        json_response(
             StatusCode::BAD_REQUEST,
             &serde_json::json!({ "error": "invalid_request" }),
-        );
+        )
+    };
+    let Ok(request) = serde_json::from_slice::<ActionRequest>(&body) else {
+        return invalid();
+    };
+    let mut presented = headers.get_all(CAPABILITY_HEADER).iter();
+    let capability = match (presented.next(), presented.next()) {
+        (None, _) => None,
+        (Some(value), None) if value.len() <= MAX_CAPABILITY_BYTES => match value.to_str() {
+            Ok(token) => Some(token.to_owned()),
+            Err(_) => return invalid(),
+        },
+        _ => return invalid(),
     };
     let request_id = request.request_id.clone();
     // Set by the TLS listener from the verified client certificate; absent
@@ -79,7 +97,9 @@ async fn execute(
     let connection = connection.map(|Extension(c)| c).unwrap_or_default();
     let response = tokio::time::timeout(
         state.limits.request_timeout,
-        state.gateway.execute(&connection, request),
+        state
+            .gateway
+            .execute_with_capability(&connection, capability.as_deref(), request),
     )
     .await
     .unwrap_or(ActionResponse::Failed {

@@ -13,12 +13,15 @@
 //! spawns a background task, so a cancelled request drops every in-flight
 //! future, including the downstream call and the credential.
 //!
-//! Milestone 0 limits:
-//! - Tasks are [`TaskAuthorization::DevelopmentUnscoped`]; the capability
-//!   transport arrives with WP-09.
-//! - Requests that need approval are denied; the approval flow arrives with
-//!   WP-13 and WP-14.
-//! - Replay, freshness, quotas, and rate limits arrive with WP-10.
+//! Task capabilities (ADR 0003): with a [`CapabilityVerifier`] configured,
+//! every request must present a valid capability, verified before any state
+//! or configuration is consulted. Without one, requests are
+//! [`TaskAuthorization::DevelopmentUnscoped`], which the authorizer accepts
+//! only under the `development` profile, and a presented capability is
+//! refused rather than ignored.
+//!
+//! Requests that need approval are denied; the approval flow arrives with
+//! WP-13 and WP-14.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -30,9 +33,11 @@ use acf_audit::{
 };
 use acf_config::{AuditClass, Classification, ResolvedAction, ValidatedConfig, validate_params};
 use acf_connectors::{ActionConnector, ConnectorCall, ConnectorError, normalize_params};
-use acf_identity::{ConnectionInfo, IdentityContext, IdentityContextProvider};
+use acf_identity::{CapabilityVerifier, ConnectionInfo, IdentityContext, IdentityContextProvider};
 use acf_policy::{AuthorizationRequest, Authorizer, DecisionReason, Permit, TaskAuthorization};
-use acf_protocol::{ActionRequest, ActionResponse, DenialReason, FailureReason};
+use acf_protocol::{
+    ActionRequest, ActionResponse, DenialReason, FailureReason, TaskCapabilityClaims,
+};
 use acf_secrets::{ResolvedSecret, SecretError, SecretProvider, SecretRef};
 use serde_json::{Map, Value, json};
 use time::OffsetDateTime;
@@ -96,6 +101,7 @@ pub struct Gateway {
     connector: Arc<dyn ActionConnector>,
     audit: AuditSettings,
     state: StateSettings,
+    capabilities: Option<CapabilityVerifier>,
 }
 
 /// Per-request audit context.
@@ -103,6 +109,7 @@ struct Trail<'a> {
     gateway: &'a Gateway,
     request: &'a ActionRequest,
     identity: Option<&'a IdentityContext>,
+    capability: Option<&'a TaskCapabilityClaims>,
 }
 
 impl Trail<'_> {
@@ -120,6 +127,7 @@ impl Trail<'_> {
             event.principal = Some(identity.principal.clone());
             event.device.clone_from(&identity.device);
         }
+        event.capability = self.capability.map(|claims| claims.jti.clone());
         event
     }
 
@@ -205,17 +213,64 @@ impl Gateway {
             connector,
             audit,
             state,
+            capabilities: None,
         })
+    }
+
+    /// Requires every request to carry a capability that `verifier` accepts.
+    #[must_use]
+    pub fn require_capabilities(mut self, verifier: CapabilityVerifier) -> Self {
+        self.capabilities = Some(verifier);
+        self
     }
 
     fn config(&self) -> &ValidatedConfig {
         self.authorizer.config()
     }
 
-    /// Handles one action request.
+    /// Handles one action request without a capability.
     pub async fn execute(
         &self,
         connection: &ConnectionInfo,
+        request: ActionRequest,
+    ) -> ActionResponse {
+        self.execute_with_capability(connection, None, request)
+            .await
+    }
+
+    /// Verifies the presented capability, if any. `Ok(None)` means an
+    /// unscoped development task.
+    fn verify_capability(
+        &self,
+        capability: Option<&str>,
+    ) -> Result<Option<TaskCapabilityClaims>, &'static str> {
+        match (capability, &self.capabilities) {
+            (Some(token), Some(verifier)) => verifier
+                .verify(token)
+                .map(Some)
+                .map_err(acf_identity::CapabilityError::code),
+            (Some(_), None) => Err("capability_unverifiable"),
+            (None, Some(_)) => Err("capability_missing"),
+            (None, None) => Ok(None),
+        }
+    }
+
+    /// Constraints must see normalized values. Unknown actions skip
+    /// normalization; `authorize` denies them. `None` means invalid
+    /// parameters.
+    fn normalized_params(&self, request: &ActionRequest) -> Option<Map<String, Value>> {
+        let Some(resolved) = self.config().action(&request.resource, &request.action) else {
+            return Some(request.parameters.clone());
+        };
+        validate_params(&resolved.action.params, &request.parameters).ok()?;
+        normalize_params(&resolved.action.params, &request.parameters).ok()
+    }
+
+    /// Handles one action request with the capability the daemon presented.
+    pub async fn execute_with_capability(
+        &self,
+        connection: &ConnectionInfo,
+        capability: Option<&str>,
         request: ActionRequest,
     ) -> ActionResponse {
         let request_id = request.request_id.clone();
@@ -229,24 +284,45 @@ impl Gateway {
                 gateway: self,
                 request: &request,
                 identity: None,
+                capability: None,
             }
             .denied("unauthenticated".to_owned())
             .await;
             return denied(DenialReason::Unauthenticated);
         };
+        let claims = match self.verify_capability(capability) {
+            Ok(claims) => claims,
+            Err(code) => {
+                Trail {
+                    gateway: self,
+                    request: &request,
+                    identity: Some(&identity),
+                    capability: None,
+                }
+                .denied(code.to_owned())
+                .await;
+                return denied(DenialReason::CapabilityInvalid);
+            }
+        };
         let trail = Trail {
             gateway: self,
             request: &request,
             identity: Some(&identity),
+            capability: claims.as_ref(),
         };
         let now = OffsetDateTime::now_utc().unix_timestamp();
-        if let Err((reason, code)) = state::admit(&self.state, &identity, &request, now).await {
+        let jti = claims.as_ref().map(|c| (&c.jti, c.iat));
+        if let Err((reason, code)) = state::admit(&self.state, &identity, &request, jti, now).await
+        {
             trail.denied(code).await;
             return denied(reason);
         }
         let mut authorization = AuthorizationRequest {
             identity: &identity,
-            task: TaskAuthorization::DevelopmentUnscoped,
+            task: claims.as_ref().map_or(
+                TaskAuthorization::DevelopmentUnscoped,
+                TaskAuthorization::Verified,
+            ),
             task_id: &request.task_id,
             action: &request.action,
             resource: &request.resource,
@@ -258,22 +334,9 @@ impl Gateway {
             return denied(reason.denial());
         }
 
-        // Constraints must see normalized values. Unknown actions skip
-        // normalization; `authorize` denies them below.
-        let normalized = match self.config().action(&request.resource, &request.action) {
-            Some(resolved) => {
-                let normalized = validate_params(&resolved.action.params, &request.parameters)
-                    .ok()
-                    .and_then(|()| {
-                        normalize_params(&resolved.action.params, &request.parameters).ok()
-                    });
-                let Some(normalized) = normalized else {
-                    trail.denied("invalid_parameters".to_owned()).await;
-                    return denied(DenialReason::InvalidParameters);
-                };
-                normalized
-            }
-            None => request.parameters.clone(),
+        let Some(normalized) = self.normalized_params(&request) else {
+            trail.denied("invalid_parameters".to_owned()).await;
+            return denied(DenialReason::InvalidParameters);
         };
         authorization.params = &normalized;
         let permit = match self.authorizer.authorize(&authorization) {
@@ -296,7 +359,7 @@ impl Gateway {
             &self.state,
             &identity,
             &request,
-            None,
+            claims.as_ref().map(|c| (&c.jti, c.exp)),
             mutating,
             &permit,
             now,

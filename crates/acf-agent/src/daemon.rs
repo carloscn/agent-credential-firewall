@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use acf_protocol::{
     ActionRequest, CreateTaskRequest, LocalActionRequest, LocalError, LocalErrorCode, TaskHandle,
+    TaskProposal,
 };
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path as UrlPath, State};
@@ -28,7 +29,7 @@ use serde::Serialize;
 use time::OffsetDateTime;
 use tokio::net::UnixListener;
 
-use crate::gateway::GatewayClient;
+use crate::gateway::{AuthorityClient, GatewayClient};
 use crate::new_request_id;
 use crate::tasks::{Peer, TaskError, TaskRegistry};
 
@@ -116,6 +117,7 @@ pub fn bind(path: &Path, mode: u32) -> Result<BoundSocket, DaemonError> {
 struct AppState {
     tasks: TaskRegistry,
     gateway: GatewayClient,
+    authority: Option<AuthorityClient>,
 }
 
 fn json(status: StatusCode, body: &impl Serialize) -> Response {
@@ -137,7 +139,35 @@ async fn create_task(
     let Ok(request) = serde_json::from_slice::<CreateTaskRequest>(&body) else {
         return error(StatusCode::BAD_REQUEST, LocalErrorCode::InvalidRequest);
     };
-    match state.tasks.create(peer, request.task_id, request.pid) {
+    // With an authority, the scope is a proposal it must sign. Without one,
+    // a scope cannot be honored, so asking for one is refused rather than
+    // silently ignored.
+    let issued = match (&state.authority, request.basis) {
+        (Some(authority), Some(basis)) => {
+            let proposal = TaskProposal {
+                task_id: request.task_id.clone(),
+                basis,
+                grants: request.grants,
+                ttl_secs: request.ttl_secs,
+            };
+            match authority.propose(&proposal).await {
+                Ok(Ok(issued)) if issued.task_id == request.task_id => Some(issued),
+                Ok(Ok(_)) | Err(_) => {
+                    return error(
+                        StatusCode::BAD_GATEWAY,
+                        LocalErrorCode::AuthorityUnavailable,
+                    );
+                }
+                Ok(Err(_)) => return error(StatusCode::FORBIDDEN, LocalErrorCode::TaskDenied),
+            }
+        }
+        (None, None) if request.grants.is_empty() && request.ttl_secs.is_none() => None,
+        _ => return error(StatusCode::BAD_REQUEST, LocalErrorCode::InvalidRequest),
+    };
+    match state
+        .tasks
+        .create(peer, request.task_id, request.pid, issued)
+    {
         Ok(status) => json(StatusCode::CREATED, &status),
         Err(TaskError::TooMany) => {
             error(StatusCode::TOO_MANY_REQUESTS, LocalErrorCode::TooManyTasks)
@@ -168,7 +198,7 @@ async fn execute(
     let Ok(local) = serde_json::from_slice::<LocalActionRequest>(&body) else {
         return error(StatusCode::BAD_REQUEST, LocalErrorCode::InvalidRequest);
     };
-    let Some(task) = state.tasks.get(peer, &local.task_handle) else {
+    let Some(task) = state.tasks.resolve(peer, &local.task_handle) else {
         return error(StatusCode::NOT_FOUND, LocalErrorCode::UnknownTask);
     };
     let Ok(request_id) = new_request_id() else {
@@ -177,14 +207,14 @@ async fn execute(
     let request = ActionRequest {
         request_id,
         timestamp: OffsetDateTime::now_utc(),
-        task_id: task.task_id,
+        task_id: task.task_id.clone(),
         action: local.action,
         resource: local.resource,
         parameters: local.parameters,
         idempotency_key: local.idempotency_key,
         approval_id: local.approval_id,
     };
-    match state.gateway.execute(&request).await {
+    match state.gateway.execute(&request, task.capability()).await {
         // Re-serialized from the typed model: nothing outside it reaches
         // the agent.
         Ok((status, response)) => json(
@@ -195,8 +225,9 @@ async fn execute(
     }
 }
 
-/// The local API.
-pub fn router(gateway: GatewayClient) -> Router {
+/// The local API. With an `authority`, every task must be authorized by it
+/// and requests carry the resulting capability.
+pub fn router(gateway: GatewayClient, authority: Option<AuthorityClient>) -> Router {
     Router::new()
         .route("/v1/tasks", post(create_task))
         .route("/v1/tasks/{handle}", get(task_status))
@@ -205,6 +236,7 @@ pub fn router(gateway: GatewayClient) -> Router {
         .with_state(Arc::new(AppState {
             tasks: TaskRegistry::default(),
             gateway,
+            authority,
         }))
 }
 

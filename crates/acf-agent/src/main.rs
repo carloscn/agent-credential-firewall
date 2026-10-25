@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use acf_agent::daemon;
-use acf_agent::gateway::{self, GatewayClient};
+use acf_agent::gateway::{self, AuthorityClient, GatewayClient};
 use acf_agent::{AgentError, local};
-use acf_protocol::{ActionResponse, TaskHandle};
+use acf_protocol::{ActionResponse, BasisRequest, CreateTaskRequest, JobId, TaskHandle, TaskId};
 use clap::{Args, Parser, Subcommand};
 use tokio::signal::unix::{SignalKind, signal};
 
@@ -60,6 +60,13 @@ struct DaemonArgs {
     /// CA that issued the gateway's certificate (PEM). System roots are not used.
     #[arg(long)]
     gateway_ca: PathBuf,
+    /// Capability Authority base URL (https). Every task then needs a
+    /// capability from it.
+    #[arg(long)]
+    authority: Option<String>,
+    /// CA that issued the authority's certificate (PEM). Default: `--gateway-ca`.
+    #[arg(long, requires = "authority")]
+    authority_ca: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -75,6 +82,19 @@ enum TaskCommand {
         /// Restrict the handle to this PID (for launchers).
         #[arg(long)]
         pid: Option<u32>,
+        /// Ask the authority to authorize under this signed job definition.
+        #[arg(long, conflicts_with = "scheduler")]
+        job: Option<String>,
+        /// Ask the authority to authorize as a configured scheduler.
+        #[arg(long)]
+        scheduler: bool,
+        /// Proposed grant as ACTION@RESOURCE; repeatable. Default: the
+        /// whole scope of the basis.
+        #[arg(long = "grant", value_name = "ACTION@RESOURCE")]
+        grants: Vec<String>,
+        /// Proposed lifetime in seconds.
+        #[arg(long)]
+        ttl: Option<u32>,
     },
     /// Show a task.
     Status {
@@ -122,17 +142,26 @@ fn parse_mode(text: &str) -> Result<u32, String> {
 
 #[expect(clippy::print_stderr, reason = "daemon startup messages")]
 async fn run_daemon(args: DaemonArgs) -> ExitCode {
-    let client = (|| {
+    let clients = (|| {
         let key = gateway::read_private_key(&args.client_key)?;
-        let tls = gateway::client_config(
-            &gateway::read_public(&args.client_cert)?,
-            &key,
-            &gateway::read_public(&args.gateway_ca)?,
-        )?;
-        GatewayClient::new(&args.gateway, tls)
+        let certificate = gateway::read_public(&args.client_cert)?;
+        let tls =
+            gateway::client_config(&certificate, &key, &gateway::read_public(&args.gateway_ca)?)?;
+        let authority = match &args.authority {
+            Some(url) => {
+                let ca =
+                    gateway::read_public(args.authority_ca.as_ref().unwrap_or(&args.gateway_ca))?;
+                Some(AuthorityClient::new(
+                    url,
+                    gateway::client_config(&certificate, &key, &ca)?,
+                )?)
+            }
+            None => None,
+        };
+        Ok::<_, gateway::GatewayError>((GatewayClient::new(&args.gateway, tls)?, authority))
     })();
-    let client = match client {
-        Ok(client) => client,
+    let (client, authority) = match clients {
+        Ok(clients) => clients,
         Err(error) => {
             eprintln!("acf-agent: {error}");
             return ExitCode::FAILURE;
@@ -163,7 +192,7 @@ async fn run_daemon(args: DaemonArgs) -> ExitCode {
         return ExitCode::FAILURE;
     };
     tokio::select! {
-        () = daemon::serve(socket, allowed, daemon::router(client)) => {}
+        () = daemon::serve(socket, allowed, daemon::router(client, authority)) => {}
         _ = terminate.recv() => {}
         _ = interrupt.recv() => {}
     }
@@ -184,8 +213,33 @@ fn print(value: &impl serde::Serialize) -> bool {
 
 async fn task(command: TaskCommand) -> Result<ExitCode, AgentError> {
     let status = match command {
-        TaskCommand::Create { socket, task, pid } => {
-            local::create_task(&socket, &task, pid).await?
+        TaskCommand::Create {
+            socket,
+            task,
+            pid,
+            job,
+            scheduler,
+            grants,
+            ttl,
+        } => {
+            let basis = match (job, scheduler) {
+                (Some(job), _) => Some(BasisRequest::Job {
+                    job: JobId::new(job)?,
+                }),
+                (None, true) => Some(BasisRequest::Scheduler),
+                (None, false) => None,
+            };
+            let request = CreateTaskRequest {
+                task_id: TaskId::new(task)?,
+                pid,
+                basis,
+                grants: grants
+                    .iter()
+                    .map(|g| acf_agent::parse_grant(g))
+                    .collect::<Result<_, _>>()?,
+                ttl_secs: ttl,
+            };
+            local::propose_task(&socket, &request).await?
         }
         TaskCommand::Status { socket, handle } => {
             local::task_status(&socket, &TaskHandle::new(handle)?).await?

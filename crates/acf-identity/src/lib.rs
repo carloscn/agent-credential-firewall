@@ -149,11 +149,22 @@ pub trait IdentityContextProvider: Send + Sync {
     async fn resolve(&self, connection: &ConnectionInfo) -> Result<IdentityContext, IdentityError>;
 }
 
+mod capability;
 mod mtls;
+#[cfg(feature = "tls")]
+mod tls;
+pub use capability::{
+    AUTHORITY_KEYS_SCHEMA, AuthorityKey, AuthorityKeys, AuthorityKeysError, CapabilityError,
+    CapabilityVerifier, MAX_CAPABILITY_LIFETIME_SECS,
+};
 pub use mtls::{
     DEVICE_REGISTRY_SCHEMA, DeviceEntry, DeviceRegistry, MtlsIdentityProvider, RegistryError,
     thumbprint,
 };
+#[cfg(feature = "tls")]
+pub use mtls::{REGISTRY_POLL, watch_registry};
+#[cfg(feature = "tls")]
+pub use tls::{HANDSHAKE_TIMEOUT, TlsError, serve_tls, server_config};
 
 #[cfg(feature = "development")]
 mod development;

@@ -1,4 +1,5 @@
-//! The daemon's mTLS connection to the gateway (ADR 0002).
+//! The daemon's mTLS connections to the gateway and the Capability
+//! Authority (ADR 0002, ADR 0003).
 
 use std::fs::File;
 use std::io::Read;
@@ -7,7 +8,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use acf_protocol::{ActionRequest, ActionResponse};
+use acf_protocol::{
+    ActionRequest, ActionResponse, AuthorityError, AuthorityErrorCode, CAPABILITY_HEADER,
+    TaskIssued, TaskProposal,
+};
 use reqwest::Url;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -134,26 +138,15 @@ impl GatewayClient {
     /// Returns [`GatewayError`] if the URL is not `https` or the client
     /// cannot be built.
     pub fn new(base: &str, tls: ClientConfig) -> Result<Self, GatewayError> {
-        let base = Url::parse(base).map_err(|_| GatewayError::Url)?;
-        if base.scheme() != "https" {
-            return Err(GatewayError::Url);
-        }
-        let execute = base
-            .join("/v1/actions/execute")
-            .map_err(|_| GatewayError::Url)?;
-        let http = reqwest::Client::builder()
-            .use_preconfigured_tls(tls)
-            .https_only(true)
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .map_err(|e| GatewayError::Config(e.to_string()))?;
-        Ok(Self { execute, http })
+        let base = https_base(base)?;
+        Ok(Self {
+            execute: endpoint(&base, "/v1/actions/execute")?,
+            http: mtls_client(tls)?,
+        })
     }
 
-    /// Sends one request; returns the HTTP status and the parsed response.
+    /// Sends one request with the task's capability, if any; returns the
+    /// HTTP status and the parsed response.
     ///
     /// # Errors
     ///
@@ -162,31 +155,116 @@ impl GatewayClient {
     pub async fn execute(
         &self,
         request: &ActionRequest,
+        capability: Option<&str>,
     ) -> Result<(u16, ActionResponse), GatewayError> {
         let body = serde_json::to_vec(request).map_err(|_| GatewayError::Transport)?;
-        let mut response = self
+        let mut builder = self
             .http
             .post(self.execute.clone())
             .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body)
-            .send()
-            .await
-            .map_err(|_| GatewayError::Transport)?;
-        let status = response.status().as_u16();
-        let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| GatewayError::Transport)?
-        {
-            if bytes.len() + chunk.len() > MAX_RESPONSE_BYTES {
-                return Err(GatewayError::UnexpectedResponse(status));
-            }
-            bytes.extend_from_slice(&chunk);
+            .body(body);
+        if let Some(capability) = capability {
+            builder = builder.header(CAPABILITY_HEADER, capability);
         }
+        let (status, bytes) = send(builder).await?;
         let parsed =
             serde_json::from_slice(&bytes).map_err(|_| GatewayError::UnexpectedResponse(status))?;
         Ok((status, parsed))
+    }
+}
+
+fn endpoint(base: &Url, path: &str) -> Result<Url, GatewayError> {
+    base.join(path).map_err(|_| GatewayError::Url)
+}
+
+fn https_base(base: &str) -> Result<Url, GatewayError> {
+    let base = Url::parse(base).map_err(|_| GatewayError::Url)?;
+    if base.scheme() == "https" {
+        Ok(base)
+    } else {
+        Err(GatewayError::Url)
+    }
+}
+
+/// An HTTP client that speaks only TLS with `tls`, never follows redirects,
+/// and never uses a proxy.
+fn mtls_client(tls: ClientConfig) -> Result<reqwest::Client, GatewayError> {
+    reqwest::Client::builder()
+        .use_preconfigured_tls(tls)
+        .https_only(true)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| GatewayError::Config(e.to_string()))
+}
+
+/// Sends `builder`; returns the status and at most [`MAX_RESPONSE_BYTES`].
+async fn send(builder: reqwest::RequestBuilder) -> Result<(u16, Vec<u8>), GatewayError> {
+    let mut response = builder.send().await.map_err(|_| GatewayError::Transport)?;
+    let status = response.status().as_u16();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| GatewayError::Transport)?
+    {
+        if bytes.len() + chunk.len() > MAX_RESPONSE_BYTES {
+            return Err(GatewayError::UnexpectedResponse(status));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok((status, bytes))
+}
+
+/// Proposes tasks to the Capability Authority over mTLS.
+#[derive(Clone, Debug)]
+pub struct AuthorityClient {
+    tasks: Url,
+    http: reqwest::Client,
+}
+
+impl AuthorityClient {
+    /// A client for the authority at `base` (an `https` URL).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GatewayError`] if the URL is not `https` or the client
+    /// cannot be built.
+    pub fn new(base: &str, tls: ClientConfig) -> Result<Self, GatewayError> {
+        let base = https_base(base)?;
+        Ok(Self {
+            tasks: endpoint(&base, "/v1/tasks")?,
+            http: mtls_client(tls)?,
+        })
+    }
+
+    /// Proposes a task. The outer error is transport; the inner one is the
+    /// authority's refusal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GatewayError`] if the authority is unreachable or answers
+    /// with neither a capability nor an authority error.
+    pub async fn propose(
+        &self,
+        proposal: &TaskProposal,
+    ) -> Result<Result<TaskIssued, AuthorityErrorCode>, GatewayError> {
+        let body = serde_json::to_vec(proposal).map_err(|_| GatewayError::Transport)?;
+        let (status, bytes) = send(
+            self.http
+                .post(self.tasks.clone())
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body),
+        )
+        .await?;
+        if let Ok(issued) = serde_json::from_slice::<TaskIssued>(&bytes) {
+            return Ok(Ok(issued));
+        }
+        serde_json::from_slice::<AuthorityError>(&bytes)
+            .map(|refusal| Err(refusal.error))
+            .map_err(|_| GatewayError::UnexpectedResponse(status))
     }
 }
 

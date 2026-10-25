@@ -75,7 +75,7 @@ fn claims() -> TaskCapabilityClaims {
     serde_json::from_value(json!({
         "iss": "acf-authority-prod",
         "aud": "acf-gateway-prod-eu",
-        "sub": "user:alice@example.com",
+        "sub": "workload:agent-prod-17",
         "jti": "cap-1",
         "iat": 1000, "nbf": 1000, "exp": 2000,
         "cnf": { "x5t#S256": THUMBPRINT },
@@ -170,6 +170,7 @@ fn baseline_requests_are_allowed() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "one table of cases")]
 fn each_layer_denies_on_its_own() {
     let authorizer = authorizer();
     let cases: Vec<(&str, Mutation, DecisionReason)> = vec![
@@ -210,6 +211,11 @@ fn each_layer_denies_on_its_own() {
             "no certificate",
             |c| c.identity.certificate = None,
             DecisionReason::CertificateMismatch,
+        ),
+        (
+            "certificate re-enrolled to another principal",
+            |c| c.identity.principal = PrincipalId::new("workload:other").unwrap(),
+            DecisionReason::CapabilitySubjectMismatch,
         ),
         (
             "other task",
@@ -255,7 +261,11 @@ fn each_layer_denies_on_its_own() {
         ),
         (
             "policy has no rule for the caller",
-            |c| c.identity.principal = PrincipalId::new("workload:other").unwrap(),
+            |c| {
+                let other = PrincipalId::new("workload:other").unwrap();
+                c.identity.principal = other.clone();
+                c.claims.as_mut().unwrap().sub = other;
+            },
             DecisionReason::PolicyNoMatchingRule,
         ),
     ];

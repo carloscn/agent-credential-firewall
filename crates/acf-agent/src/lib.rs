@@ -19,8 +19,8 @@ pub mod tasks;
 use std::fmt::Write as _;
 
 use acf_protocol::{
-    ActionName, ActionRequest, ActionResponse, IdError, LocalActionRequest, LocalErrorCode,
-    RequestId, ResourceId, TaskHandle, TaskId,
+    ActionName, ActionRequest, ActionResponse, ConstraintSet, Grant, IdError, LocalActionRequest,
+    LocalErrorCode, RequestId, ResourceId, TaskHandle, TaskId,
 };
 use serde_json::{Map, Value};
 use time::OffsetDateTime;
@@ -34,6 +34,9 @@ pub enum AgentError {
     /// A `--param` argument is not `key=value`.
     #[error("parameters must be KEY=VALUE")]
     InvalidParam,
+    /// A `--grant` argument is not `ACTION@RESOURCE`.
+    #[error("grants must be ACTION@RESOURCE")]
+    InvalidGrant,
     /// A parameter name appears twice.
     #[error("parameter `{0}` given more than once")]
     DuplicateParam(String),
@@ -77,6 +80,21 @@ pub fn parse_param(argument: &str) -> Result<(String, Value), AgentError> {
     }
     let value = serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_owned()));
     Ok((key.to_owned(), value))
+}
+
+/// Parses `ACTION@RESOURCE` into a grant without constraints.
+///
+/// # Errors
+///
+/// Returns [`AgentError::InvalidGrant`] if there is no `@`, or
+/// [`AgentError::InvalidId`] for a malformed action or resource.
+pub fn parse_grant(argument: &str) -> Result<Grant, AgentError> {
+    let (action, resource) = argument.split_once('@').ok_or(AgentError::InvalidGrant)?;
+    Ok(Grant {
+        action: ActionName::new(action)?,
+        resource: ResourceId::new(resource)?,
+        constraints: ConstraintSet::default(),
+    })
 }
 
 /// A fresh, unpredictable request identifier.
