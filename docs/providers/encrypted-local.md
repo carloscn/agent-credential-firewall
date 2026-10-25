@@ -1,14 +1,59 @@
 # Encrypted Local Secret Provider
 
-Status: Draft
+Status: Demo implemented; production hardening pending
 
-Last updated: 2026-10-24
+Last updated: 2026-10-25
 
 ## 1. Purpose
 
 The encrypted local provider allows an ACF Gateway to store secrets on gateway-controlled VPS or on-premises storage without requiring a third-party secret-management service.
 
 It is a built-in provider behind the same runtime `SecretProvider` interface used by external adapters. Agents, connector profiles, and policies cannot tell whether a secret is local or remote.
+
+### 1.1 Implemented demo
+
+`acf-provider-local::DemoLocalProvider` supplies a small, executable implementation for development and architecture validation:
+
+- implements both `SecretProvider` and the separately scoped `SecretAdmin` contract;
+- encrypts each secret in its own record with AES-256-GCM and a fresh random 96-bit nonce;
+- derives separate encryption, record-index, and integrity keys from a 256-bit root key;
+- converts logical references into HMAC-derived opaque filenames;
+- authenticates the reference, monotonic version, use binding, deletion state, nonce, and ciphertext;
+- uses a mode-`0700` directory, mode-`0600` files, temporary-file flush, atomic rename, and directory flush on Unix;
+- keeps deletion tombstones so deleting and recreating a logical reference cannot reuse an old version;
+- decrypts only the selected record during `get()`; metadata listing verifies HMACs without decrypting secret values;
+- returns the stored authenticated use binding in `ResolvedSecret::attested_binding`.
+
+Minimal construction:
+
+```rust
+let key = LocalStoreKey::from_material(root_key_material)?;
+let provider = DemoLocalProvider::initialize(
+    "/var/lib/acf-demo",
+    Namespace::new("development")?,
+    key,
+)?;
+
+provider.put(&reference, secret_material, binding).await?;
+let resolved = provider.get(&reference).await?;
+```
+
+The root key must come from a protected operator or service bootstrap path. It must never be placed in repository configuration, command-line arguments, logs, or an agent-visible environment variable.
+
+### 1.2 Demo limitations
+
+The demo deliberately does **not** claim production readiness. In particular, it currently has:
+
+- one process-held root key instead of a KEK and independently wrapped per-record DEKs;
+- authenticated but plaintext logical-reference and binding metadata inside each opaque-named record;
+- an in-process writer mutex, not a cross-process administrative lock;
+- no external rollback anchor, so an older valid directory snapshot can reactivate an older credential;
+- no key-source abstraction, storage-key rotation, backup/restore ceremony, manifest reload protocol, or crash-recovery journal;
+- ordinary blocking filesystem calls inside the async trait implementation;
+- no protection against a privileged process reading the unlocked gateway memory;
+- no guarantee that overwritten ciphertext blocks are physically erased by the filesystem or storage device.
+
+Use it for local demos, provider contract testing, and connector integration. Production mode must continue to reject this demo until the remaining design sections are implemented and reviewed.
 
 ## 2. Security properties
 
