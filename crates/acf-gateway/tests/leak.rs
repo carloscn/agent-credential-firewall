@@ -140,10 +140,16 @@ fn scratch_dir() -> PathBuf {
     dir
 }
 
+static NEXT_REQUEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 fn action(name: &str, params: &Value) -> Vec<u8> {
+    let id = NEXT_REQUEST.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let timestamp = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
     serde_json::to_vec(&json!({
-        "requestId": format!("req-{}", name.replace('.', "-")),
-        "timestamp": "2026-10-24T18:00:00Z",
+        "requestId": format!("req-leak-{id}"),
+        "timestamp": timestamp,
         "taskId": "leak-task",
         "action": name,
         "resource": "example-api:development",
@@ -177,6 +183,7 @@ async fn spawn_gateway(upstream: u16) -> (Child, String, PathBuf, PathBuf) {
         .args(["--policy", policy.to_str().unwrap()])
         .args(["--listen", &format!("127.0.0.1:{port}")])
         .args(["--audit-log", audit.to_str().unwrap()])
+        .args(["--state-db", dir.join("state.sqlite").to_str().unwrap()])
         .args([
             "--secret-env",
             "secret://development/example-api/read=ACF_LEAK_CANARY",

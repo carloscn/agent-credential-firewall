@@ -28,7 +28,7 @@ use acf_audit::{
     AuditEvent, AuditHasher, AuditParam, AuditSink, Downstream, EventKind, GatewayInfo, PolicyRef,
     Verdict,
 };
-use acf_config::{AuditClass, ResolvedAction, ValidatedConfig, validate_params};
+use acf_config::{AuditClass, Classification, ResolvedAction, ValidatedConfig, validate_params};
 use acf_connectors::{ActionConnector, ConnectorCall, ConnectorError, normalize_params};
 use acf_identity::{ConnectionInfo, IdentityContext, IdentityContextProvider};
 use acf_policy::{AuthorizationRequest, Authorizer, DecisionReason, Permit, TaskAuthorization};
@@ -36,6 +36,8 @@ use acf_protocol::{ActionRequest, ActionResponse, DenialReason, FailureReason};
 use acf_secrets::{ResolvedSecret, SecretError, SecretProvider, SecretRef};
 use serde_json::{Map, Value, json};
 use time::OffsetDateTime;
+
+use crate::state::{self, StateSettings};
 
 /// Runtime secret providers by namespace.
 #[derive(Clone, Default)]
@@ -93,6 +95,7 @@ pub struct Gateway {
     providers: ProviderRegistry,
     connector: Arc<dyn ActionConnector>,
     audit: AuditSettings,
+    state: StateSettings,
 }
 
 /// Per-request audit context.
@@ -185,6 +188,7 @@ impl Gateway {
         providers: ProviderRegistry,
         connector: Arc<dyn ActionConnector>,
         audit: AuditSettings,
+        state: StateSettings,
     ) -> Result<Self, GatewayError> {
         authorizer
             .check_identity_provider(identity.assurance())
@@ -200,6 +204,7 @@ impl Gateway {
             providers,
             connector,
             audit,
+            state,
         })
     }
 
@@ -234,6 +239,11 @@ impl Gateway {
             request: &request,
             identity: Some(&identity),
         };
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        if let Err((reason, code)) = state::admit(&self.state, &identity, &request, now).await {
+            trail.denied(code).await;
+            return denied(reason);
+        }
         let mut authorization = AuthorizationRequest {
             identity: &identity,
             task: TaskAuthorization::DevelopmentUnscoped,
@@ -241,7 +251,7 @@ impl Gateway {
             action: &request.action,
             resource: &request.resource,
             params: &request.parameters,
-            now_unix: OffsetDateTime::now_utc().unix_timestamp(),
+            now_unix: now,
         };
         if let Err(reason) = self.authorizer.pre_authorize(&authorization) {
             trail.denied(reason.code()).await;
@@ -280,6 +290,21 @@ impl Gateway {
         if permit.approval_required {
             trail.denied("approval_unavailable".to_owned()).await;
             return denied(DenialReason::ApprovalInvalid);
+        }
+        let mutating = resolved.action.classification == Classification::Mutate;
+        if let Err((reason, code)) = state::charge(
+            &self.state,
+            &identity,
+            &request,
+            None,
+            mutating,
+            &permit,
+            now,
+        )
+        .await
+        {
+            trail.denied(code).await;
+            return denied(reason);
         }
 
         self.run_allowed(&trail, resolved, &normalized, &permit)

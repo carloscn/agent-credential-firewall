@@ -13,7 +13,8 @@ target/debug/acf-gateway \
   --config examples/m0/config.yaml \
   --policy examples/m0/policy.yaml \
   --secret-env secret://development/example-api/read=DEMO_TOKEN \
-  --audit-log /tmp/acf-m0-audit.jsonl &
+  --audit-log /tmp/acf-m0-audit.jsonl \
+  --state-db /tmp/acf-m0-state.sqlite &
 
 target/debug/acf-agent action execute \
   --action example.profile.get \
