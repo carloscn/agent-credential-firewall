@@ -160,6 +160,12 @@ define_id!(
     validate_opaque
 );
 define_id!(
+    /// Opaque daemon-issued handle for one task. Bound to the caller's UID
+    /// and, optionally, a PID; meaningless to the gateway.
+    TaskHandle,
+    validate_opaque
+);
+define_id!(
     /// Capability `jti`. Identifies one task authorization; reusable within its TTL.
     CapabilityId,
     validate_opaque

@@ -41,7 +41,7 @@ pub enum TaskAuthorization<'a> {
     /// A signature-verified capability.
     Verified(&'a TaskCapabilityClaims),
     /// No capability. Accepted only under the `development` deployment
-    /// profile with a development identity; policy still applies.
+    /// profile; policy still applies.
     DevelopmentUnscoped,
 }
 
@@ -81,8 +81,7 @@ pub enum ConstraintLayer {
 pub enum DecisionReason {
     /// A development identity under the `production` profile.
     IdentityAssuranceRejected,
-    /// An unscoped development task outside the `development` profile or
-    /// without a development identity.
+    /// An unscoped development task outside the `development` profile.
     DevelopmentTaskRejected,
     /// `nbf` is in the future.
     CapabilityNotYetValid,
@@ -345,9 +344,10 @@ impl Authorizer {
     ) -> Result<Option<&'a Grant>, DecisionReason> {
         let claims = match request.task {
             TaskAuthorization::DevelopmentUnscoped => {
-                if self.is_production()
-                    || request.identity.assurance != IdentityAssurance::Development
-                {
+                // Development profile only. Any identity may use it there,
+                // so mTLS-authenticated devices can be exercised before
+                // capabilities exist (WP-09).
+                if self.is_production() {
                     return Err(DecisionReason::DevelopmentTaskRejected);
                 }
                 return Ok(None);

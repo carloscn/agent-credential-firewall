@@ -8,18 +8,23 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
+axum.workspace = true
 clap.workspace = true
 getrandom.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
-acf-identity.workspace = true
 acf-protocol.workspace = true
 
 [dev-dependencies]
-axum.workspace = true
+rcgen.workspace = true
 
 [lints]
 workspace = true

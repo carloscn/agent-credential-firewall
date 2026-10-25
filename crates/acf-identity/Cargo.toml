@@ -15,6 +15,7 @@ development = []
 [dependencies]
 acf-protocol.workspace = true
 async-trait.workspace = true
+ring.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
