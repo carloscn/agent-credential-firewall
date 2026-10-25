@@ -72,3 +72,5 @@ Provider-specific authentication credentials and storage keys are bootstrap secr
 
 - [Encrypted local provider](encrypted-local.md)
 - [Bitwarden provider](bitwarden.md)
+
+Concrete external adapters are leaf crates. A provider crate may depend on `acf-secrets` and its vendor SDK, but `acf-secrets`, policy, protocol, connectors, state, audit, and agent crates must never depend on that adapter or SDK. A gateway composition root may select an adapter without changing the action or provider contracts.

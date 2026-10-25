@@ -1,0 +1,25 @@
+[package]
+name = "acf-provider-bitwarden"
+description = "Optional Bitwarden Secrets Manager provider for ACF."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+acf-secrets.workspace = true
+async-trait.workspace = true
+bitwarden-sm.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+acf-secrets = { workspace = true, features = ["conformance"] }
+tokio.workspace = true
+
+[lints]
+workspace = true
