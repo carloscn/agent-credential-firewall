@@ -85,6 +85,12 @@ acf-agent action execute --socket /run/acf-agent/acf.sock --task-handle <handle>
   --action <action> --resource <resource>
 ```
 
+For an MCP client such as Claude Code, run the read-only adapter as the agent's user:
+
+```bash
+claude mcp add acf -- acf-agent mcp --socket /run/acf-agent/acf.sock
+```
+
 ## 5. Check the audit trail
 
 On a machine that can read both the gateway's `{state}/gateway/audit.jsonl` and the control plane's `{state}/control-plane/checkpoints`:

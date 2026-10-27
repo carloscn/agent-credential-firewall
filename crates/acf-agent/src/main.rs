@@ -35,6 +35,12 @@ enum Command {
         #[command(subcommand)]
         command: ActionCommand,
     },
+    /// Serve the read-only MCP tools on stdin/stdout for an agent.
+    Mcp {
+        /// Daemon socket.
+        #[arg(long)]
+        socket: PathBuf,
+    },
 }
 
 #[derive(Args)]
@@ -275,6 +281,16 @@ async fn execute(
 async fn main() -> ExitCode {
     let result = match Cli::parse().command {
         Command::Daemon(args) => return run_daemon(args).await,
+        Command::Mcp { socket } => {
+            let input = tokio::io::BufReader::new(tokio::io::stdin());
+            return match acf_agent::mcp::serve(socket, input, tokio::io::stdout()).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("acf-agent mcp: {error}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
         Command::Task { command } => task(command).await,
         Command::Action {
             command:
