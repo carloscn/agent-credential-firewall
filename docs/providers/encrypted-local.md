@@ -1,8 +1,8 @@
 # Encrypted Local Secret Provider
 
-Status: Demo implemented; production hardening pending
+Status: Integrity-only store implemented and wired into the gateway; KEK/DEK, rollback anchor, and rotation pending
 
-Last updated: 2026-10-25
+Last updated: 2026-10-27
 
 ## 1. Purpose
 
@@ -22,7 +22,47 @@ It is a built-in provider behind the same runtime `SecretProvider` interface use
 - uses a mode-`0700` directory, mode-`0600` files, temporary-file flush, atomic rename, and directory flush on Unix;
 - keeps deletion tombstones so deleting and recreating a logical reference cannot reuse an old version;
 - decrypts only the selected record during `get()`; metadata listing verifies HMACs without decrypting secret values;
-- returns the stored authenticated use binding in `ResolvedSecret::attested_binding`.
+- returns the stored authenticated use binding in `ResolvedSecret::attested_binding`;
+- serializes writers across processes with an exclusive OS lock on `.writer.lock`.
+
+### 1.2 Gateway wiring and key sources
+
+The gateway opens one store per `encrypted-local` namespace at startup. It never creates a store, so a missing store stops startup.
+
+```yaml
+secret_providers:
+  production:
+    type: encrypted-local
+    path: /var/lib/acf/store
+    key_source: systemd-credential   # or mounted-file
+    key_location: acf-store-production   # credential name, or the key file's absolute path
+    rollback_resistance: none        # required: no anchor is implemented
+```
+
+The root key is exactly 32 bytes, read from a regular file (never through a symlink) that group and others cannot access:
+
+| `key_source` | Where the key is read from | Profiles |
+| --- | --- | --- |
+| `systemd-credential` | `$CREDENTIALS_DIRECTORY/<key_location>` (default name `acf-store-<namespace>`), as set up by systemd `LoadCredential=` or `LoadCredentialEncrypted=` | Both |
+| `mounted-file` | The absolute path in `key_location`, on a separately protected volume | Both |
+| `insecure-development` | The path in `key_location`, without the permission check | Development only |
+| `tpm`, `kms`, `interactive` | Not implemented: the gateway refuses to start | — |
+
+**No anchor is implemented, so a configured `rollback_anchor` is refused rather than ignored.** A store must therefore acknowledge `rollback_resistance: none`. Every gateway startup states "integrity only, no rollback resistance" for each store.
+
+Under `production` the store is accepted only on those terms: an implemented, non-development key source and the explicit acknowledgement. An older copy of a record, or of the whole directory, can therefore reactivate an older credential; restore and rotation procedures must account for that.
+
+Stores are administered with `acf-store`, using the same configuration as the gateway. It is an operator tool, never an agent action:
+
+```text
+acf-store --config bundle.yaml [--profiles DIR] init --namespace production
+acf-store --config bundle.yaml [--profiles DIR] put secret://production/…   < value
+acf-store --config bundle.yaml [--profiles DIR] delete secret://production/…
+acf-store --config bundle.yaml [--profiles DIR] list --namespace production
+```
+
+- `put` reads the value from standard input, never from an argument, and stores it with the use binding the configuration registers for that reference.
+- Output names references and versions only.
 
 Minimal construction:
 
@@ -40,20 +80,19 @@ let resolved = provider.get(&reference).await?;
 
 The root key must come from a protected operator or service bootstrap path. It must never be placed in repository configuration, command-line arguments, logs, or an agent-visible environment variable.
 
-### 1.2 Demo limitations
+### 1.3 Limitations
 
-The demo deliberately does **not** claim production readiness. In particular, it currently has:
+The implementation does **not** provide every property this document specifies. In particular, it currently has:
 
 - one process-held root key instead of a KEK and independently wrapped per-record DEKs;
 - authenticated but plaintext logical-reference and binding metadata inside each opaque-named record;
-- an in-process writer mutex, not a cross-process administrative lock;
 - no external rollback anchor, so an older valid directory snapshot can reactivate an older credential;
-- no key-source abstraction, storage-key rotation, backup/restore ceremony, manifest reload protocol, or crash-recovery journal;
+- no TPM, KMS, or interactive key source, and no storage-key rotation, backup/restore ceremony, manifest reload protocol, or crash-recovery journal;
 - ordinary blocking filesystem calls inside the async trait implementation;
 - no protection against a privileged process reading the unlocked gateway memory;
 - no guarantee that overwritten ciphertext blocks are physically erased by the filesystem or storage device.
 
-Use it for local demos, provider contract testing, and connector integration. Production mode must continue to reject this demo until the remaining design sections are implemented and reviewed.
+Production deployments that use it accept these limitations explicitly through `rollback_resistance: none`. Deployments that need rollback resistance or hardware-backed keys must wait for those sections, or use an external provider.
 
 ## 2. Security properties
 

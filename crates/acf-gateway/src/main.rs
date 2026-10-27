@@ -34,14 +34,14 @@ use acf_audit::{
     AnchorState, AuditHasher, ChainedJsonSink, CheckpointSigner, GatewayInfo, run_checkpoints,
 };
 use acf_config::{
-    ConfigRole, ConfigTrust, DeploymentProfile, SecretProviderConfig, SourceFile, ValidatedConfig,
-    load_bundle, parse_yaml,
+    ConfigRole, ConfigTrust, DeploymentProfile, SecretProviderConfig, ValidatedConfig, parse_yaml,
 };
 use acf_connectors::{HttpConnector, HttpLimits, NetworkPolicy, SystemResolver};
 use acf_gateway::{
-    AuditSettings, BUILD_FLAVOR, Gateway, HttpCheckpointPublisher, ProviderRegistry, RateLimits,
-    ServerLimits, StartupFacts, StateSettings, production_refusals, router, serve_tls,
-    server_config,
+    AuditSettings, BUILD_FLAVOR, EncryptedStore, Gateway, HttpCheckpointPublisher,
+    ProviderRegistry, RateLimits, ServerLimits, StartupFacts, StateSettings, load_config,
+    production_refusals, profile_sources, read, read_bytes, router, serve_tls, server_config,
+    source, text,
 };
 use acf_identity::{
     AuthorityKeys, CapabilityVerifier, DeviceRegistry, IdentityContextProvider,
@@ -149,29 +149,6 @@ struct Args {
     rate_limit_action: Option<u32>,
 }
 
-fn read(path: &Path) -> Result<String, String> {
-    std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
-}
-
-fn read_bytes(path: &Path) -> Result<Vec<u8>, String> {
-    std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
-}
-
-/// A document and its `.sig`, if one exists.
-fn source(path: &Path) -> Result<SourceFile, String> {
-    let mut signature_path = path.as_os_str().to_owned();
-    signature_path.push(".sig");
-    Ok(SourceFile {
-        name: path.display().to_string(),
-        bytes: read_bytes(path)?,
-        signature: std::fs::read(PathBuf::from(signature_path)).ok(),
-    })
-}
-
-fn text(file: &SourceFile) -> Result<&str, String> {
-    std::str::from_utf8(&file.bytes).map_err(|_| format!("{} is not UTF-8", file.name))
-}
-
 /// The configuration, admitted if a trust anchor was given.
 struct Loaded {
     config: ValidatedConfig,
@@ -183,21 +160,11 @@ struct Loaded {
 fn load(args: &Args) -> Result<Loaded, String> {
     let bundle = source(&args.config)?;
     let policy = source(&args.policy)?;
-    let mut profiles = Vec::new();
-    if let Some(dir) = &args.profiles {
-        let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
-            .map_err(|e| format!("cannot read {}: {e}", dir.display()))?
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "yaml"))
-            .collect();
-        paths.sort();
-        for path in paths {
-            profiles.push(source(&path)?);
-        }
-    }
-    let profile_texts = profiles.iter().map(text).collect::<Result<Vec<_>, _>>()?;
-    let config = load_bundle(text(&bundle)?, &profile_texts).map_err(|e| e.to_string())?;
+    let profiles = match &args.profiles {
+        Some(dir) => profile_sources(dir)?,
+        None => Vec::new(),
+    };
+    let config = load_config(&bundle, &profiles)?;
 
     let (digest, trust_anchor_writable) = match &args.config_trust {
         Some(path) => {
@@ -330,12 +297,12 @@ async fn serve(
     let listener = tokio::net::TcpListener::bind(args.listen)
         .await
         .map_err(|e| format!("cannot listen on {}: {e}", args.listen))?;
+    let address = listener.local_addr().unwrap_or(args.listen);
     match identity {
         #[cfg(feature = "development")]
         Identity::Development(_) => {
             report(&format!(
-                "acf-gateway ({summary}, plaintext) listening on http://{}",
-                args.listen
+                "acf-gateway ({summary}, plaintext) listening on http://{address}"
             ));
             axum::serve(listener, app).await.map_err(|e| e.to_string())
         }
@@ -353,8 +320,7 @@ async fn serve(
                 report,
             ));
             report(&format!(
-                "acf-gateway ({summary}, mTLS) listening on https://{}",
-                args.listen
+                "acf-gateway ({summary}, mTLS) listening on https://{address}"
             ));
             serve_tls(listener, tls, app)
                 .await
@@ -397,9 +363,10 @@ async fn providers(args: &Args, config: &ValidatedConfig) -> Result<ProviderRegi
                 development::in_memory(registry, args, config, namespace).await?
             }
             SecretProviderConfig::EncryptedLocal { .. } => {
-                return Err(format!(
-                    "secret_providers.{namespace}: the encrypted local provider runtime is not available yet (WP-07)"
-                ));
+                let store = EncryptedStore::from_config(namespace, provider)?;
+                let opened = store.open()?;
+                report(&store.describe());
+                registry.with(namespace.as_str(), Arc::new(opened))
             }
             SecretProviderConfig::External { adapter, .. } => {
                 return Err(format!(

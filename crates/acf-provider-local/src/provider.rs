@@ -18,6 +18,9 @@ use zeroize::Zeroizing;
 use crate::crypto::{DerivedKeys, FORMAT_VERSION, NONCE_LEN, RecordEnvelope, RecordMetadata};
 
 const HEADER_FILE: &str = "store.acf";
+/// Held with an exclusive OS file lock for every write, so concurrent
+/// administrative processes cannot interleave version updates.
+const WRITER_LOCK_FILE: &str = ".writer.lock";
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
 const MAX_SECRET_BYTES: usize = 64 * 1024;
 
@@ -100,8 +103,9 @@ struct StoreHeader {
 ///
 /// This is **not** the production provider described in the design document:
 /// it has one process-held root key instead of KEK/per-record DEKs, no external
-/// rollback anchor, no cross-process writer lock, and no durable directory
-/// recovery protocol. It must not be represented as rollback-resistant.
+/// rollback anchor, and no durable directory recovery protocol. It must not be
+/// represented as rollback-resistant. Writes are serialized across processes
+/// with an exclusive lock on `.writer.lock`.
 pub struct DemoLocalProvider {
     root: PathBuf,
     namespace: Namespace,
@@ -207,6 +211,22 @@ impl DemoLocalProvider {
         Ok(envelope)
     }
 
+    /// Takes the cross-process writer lock; released when the file drops.
+    fn lock_writers(&self) -> Result<File, SecretError> {
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(self.root.join(WRITER_LOCK_FILE))
+            .map_err(|_| SecretError::Unavailable)?;
+        file.lock().map_err(|_| SecretError::Unavailable)?;
+        Ok(file)
+    }
+
     fn write_envelope(&self, path: &Path, envelope: &RecordEnvelope) -> Result<(), SecretError> {
         let bytes = serde_json::to_vec(envelope).map_err(|_| SecretError::Corrupted)?;
         if bytes.len() > MAX_RECORD_BYTES {
@@ -258,6 +278,7 @@ impl SecretAdmin for DemoLocalProvider {
             return Err(SecretError::Corrupted);
         }
         let _guard = self.writer.lock().map_err(|_| SecretError::Corrupted)?;
+        let _lock = self.lock_writers()?;
         let path = self.record_path(reference);
         let version = match self.read_verified(&path) {
             Ok(old) => {
@@ -296,6 +317,7 @@ impl SecretAdmin for DemoLocalProvider {
     async fn delete(&self, reference: &SecretRef) -> Result<(), SecretError> {
         self.ensure_namespace(reference)?;
         let _guard = self.writer.lock().map_err(|_| SecretError::Corrupted)?;
+        let _lock = self.lock_writers()?;
         let path = self.record_path(reference);
         let envelope = self
             .read_verified(&path)

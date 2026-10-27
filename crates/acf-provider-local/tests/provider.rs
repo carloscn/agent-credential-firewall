@@ -150,6 +150,10 @@ async fn survives_restart_and_plaintext_is_absent_from_files() {
     for entry in fs::read_dir(&root).unwrap() {
         let path = entry.unwrap().path();
         let bytes = fs::read(&path).unwrap();
+        if path.file_name().unwrap() == ".writer.lock" {
+            assert!(bytes.is_empty(), "the writer lock holds no data");
+            continue;
+        }
         assert!(
             !bytes
                 .windows(CANARY.len())
@@ -286,4 +290,48 @@ fn fixture_error(error: impl std::fmt::Display) -> ConformanceFailure {
         check: "fixture",
         detail: error.to_string(),
     }
+}
+
+#[test]
+fn writes_wait_for_the_cross_process_writer_lock() {
+    let root = temporary_path();
+    let provider =
+        DemoLocalProvider::initialize(&root, Fixture::assigned_namespace(), key(12).unwrap())
+            .unwrap();
+    // Another process (here: another handle) holds the lock.
+    let holder = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join(".writer.lock"))
+        .unwrap();
+    holder.lock().unwrap();
+
+    let (done, finished) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let reference = SecretRef::parse("secret://local-demo/cloudflare/read").unwrap();
+        runtime
+            .block_on(provider.put(
+                &reference,
+                SecretMaterial::from_string("value".to_owned()),
+                Fixture::binding(),
+            ))
+            .unwrap();
+        done.send(()).unwrap();
+    });
+    assert!(
+        finished
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .is_err(),
+        "the write must wait while another writer holds the lock"
+    );
+    holder.unlock().unwrap();
+    finished
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    writer.join().unwrap();
+    fs::remove_dir_all(root).unwrap();
 }
