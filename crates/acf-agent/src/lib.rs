@@ -4,6 +4,7 @@
 //!   socket and forwards their semantic requests to the gateway over mTLS
 //!   (ADR 0002).
 //! - [`local`]: the client side of that socket, used by the CLI.
+//! - [`mcp`]: a read-only MCP adapter over the same socket, for agents.
 //! - [`send`]: the Milestone 0 development path straight to a plaintext
 //!   loopback gateway.
 //!
@@ -14,6 +15,7 @@
 pub mod daemon;
 pub mod gateway;
 pub mod local;
+pub mod mcp;
 pub mod tasks;
 
 use std::fmt::Write as _;

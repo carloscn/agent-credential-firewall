@@ -21,6 +21,10 @@ The command writes one directory per role. Paths inside each directory already p
 
 The generated `DEPLOY.md` lists the exact commands: accounts, ownership, creating the secret store, and starting the services. It also covers adding a connector, defining a job, loading a secret, and checking the audit trail.
 
+## Agents
+
+Agents reach ACF through the daemon on their host. The read-only MCP adapter, `acf-agent mcp`, gives MCP clients such as Claude Code three tools; see [mcp.md](mcp.md).
+
 ## Single host
 
 Install all three role directories on one machine. The defaults (`--gateway-host localhost`, listeners on ports 8443 and 8444) cover this case. Only one agent device can be installed per host.

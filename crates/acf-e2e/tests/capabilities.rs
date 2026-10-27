@@ -9,7 +9,7 @@ mod pki;
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -45,6 +45,7 @@ use tokio::net::TcpListener;
 
 const PROFILE: &str = "example.profile.get";
 const CREATE: &str = "example.records.create";
+const DELETE: &str = "example.records.delete";
 const RESOURCE: &str = "example-api:development";
 
 const BUNDLE: &str = r#"
@@ -73,6 +74,12 @@ profiles:
         params:
           name: { location: body, type: string, required: true }
         response: { fields: [user] }
+      example.records.delete:
+        method: DELETE
+        path: /records
+        credential_slot: read
+        classification: mutate
+        response: { fields: [user] }
 resources:
   "example-api:development":
     connector: example-api
@@ -93,7 +100,7 @@ rules:
   - id: devices
     effect: allow
     principals: ['workload:vps-17', 'workload:vps-18']
-    actions: [example.profile.get, example.records.create]
+    actions: [example.profile.get, example.records.create, example.records.delete]
     resources: ['example-api:development']
 ";
 
@@ -105,6 +112,7 @@ limits: { maxRequests: 3 }
 grants:
   - { action: example.profile.get, resource: "example-api:development" }
   - { action: example.records.create, resource: "example-api:development" }
+  - { action: example.records.delete, resource: "example-api:development" }
 "#;
 
 fn authority_config(admin: &str) -> AuthorityConfig {
@@ -119,7 +127,9 @@ entitlements:
   - principal: "workload:vps-17"
     grants: [{{ action: {PROFILE}, resource: "{RESOURCE}" }}]
   - principal: "workload:vps-18"
-    grants: [{{ action: {PROFILE}, resource: "{RESOURCE}" }}]
+    grants:
+      - {{ action: {PROFILE}, resource: "{RESOURCE}" }}
+      - {{ action: {DELETE}, resource: "{RESOURCE}" }}
 job_signers:
   - {{ kid: admin-1, public_key: {admin} }}
 "#
@@ -680,4 +690,89 @@ async fn unscoped_daemons_and_unenrolled_callers_get_nothing() {
         .await
         .unwrap();
     assert_eq!(response.status().as_u16(), 401);
+}
+
+/// Sends `messages` to the MCP adapter over the daemon at `socket` and
+/// returns the response to each request.
+async fn mcp(socket: &Path, messages: &[Value]) -> Vec<Value> {
+    let mut input = Vec::new();
+    for message in messages {
+        input.extend_from_slice(message.to_string().as_bytes());
+        input.push(b'\n');
+    }
+    let mut output = Vec::new();
+    acf_agent::mcp::serve(socket.to_owned(), &input[..], &mut output)
+        .await
+        .unwrap();
+    String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn tool_call(id: u32, tool: &str, arguments: &Value) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": { "name": tool, "arguments": arguments } })
+}
+
+#[tokio::test]
+async fn mcp_tools_read_through_the_gateway_and_relay_mutation_refusals() {
+    let world = World::new().await;
+    let socket = world.daemon(&world.vps18, true);
+    let task = &mcp(
+        &socket.path(),
+        &[tool_call(
+            1,
+            "acf_request_task",
+            &json!({ "taskId": "mcp-task", "job": "profile-check" }),
+        )],
+    )
+    .await[0]["result"];
+    assert_eq!(task["isError"], false, "{task}");
+    let granted: Vec<&str> = task["structuredContent"]["grants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["action"].as_str().unwrap())
+        .collect();
+    assert_eq!(granted, [PROFILE, DELETE]);
+    let handle = task["structuredContent"]["taskHandle"].as_str().unwrap();
+
+    let responses = mcp(
+        &socket.path(),
+        &[
+            tool_call(
+                2,
+                "acf_execute_action",
+                &json!({ "taskHandle": handle, "action": PROFILE, "resource": RESOURCE }),
+            ),
+            tool_call(
+                3,
+                "acf_execute_action",
+                &json!({ "taskHandle": handle, "action": DELETE, "resource": RESOURCE }),
+            ),
+            tool_call(4, "acf_get_task_status", &json!({ "taskHandle": handle })),
+        ],
+    )
+    .await;
+    let read = &responses[0]["result"];
+    assert_eq!(read["isError"], false, "{read}");
+    assert_eq!(
+        read["structuredContent"]["result"]["body"],
+        json!({ "user": "demo", "authenticated": true })
+    );
+    // Granted by the capability, but v1.0 is read-only: the gateway's
+    // refusal comes back unchanged.
+    let mutation = &responses[1]["result"];
+    assert_eq!(mutation["isError"], true);
+    assert_eq!(mutation["structuredContent"]["status"], "denied");
+    assert_eq!(mutation["structuredContent"]["reason"], "approval_invalid");
+    assert_eq!(world.last_denial(), "approval_unavailable");
+
+    // Nothing the tools returned carries a capability or the credential.
+    let everything = format!("{task}{responses:?}");
+    assert!(!everything.contains("eyJ"), "no capability token");
+    assert!(!everything.contains("token"), "no credential");
+    assert!(!everything.contains("secret://"), "no secret reference");
 }
