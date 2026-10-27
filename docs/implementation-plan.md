@@ -1,8 +1,8 @@
 # Agent Credential Firewall — Implementation Plan
 
-Status: Ready for implementation
+Status: M0 and M1 complete; v1.0 (read-only release) in progress
 
-Last updated: 2026-10-24
+Last updated: 2026-10-27
 
 ## 1. Purpose
 
@@ -21,14 +21,18 @@ Each milestone builds only on contracts that earlier milestones have verified.
 ## 2. Milestones
 
 ```text
-M0  Non-production semantic-action skeleton
+M0    Non-production semantic-action skeleton
  ↓
-M1  Secure read path
+M1    Secure read path
  ↓
-M2  Approved mutation path
+v1.0  Read-only release: M1 made installable and usable by agents
  ↓
-M3  Extensions: Skills/MCP, Cedar, HA, more providers and connectors
+M2    Approved mutation path
+ ↓
+M3    Extensions: Skills/MCP, Cedar, HA, more providers and connectors
 ```
+
+v1.0 ships the M1 security core as a product before any mutation work. Real use will expose problems in the core that no amount of up-front design would. Fixing them on a small, deployed base is cheaper than reworking a large one.
 
 ### 2.1 M0 — non-production development skeleton
 
@@ -77,7 +81,27 @@ M1 adds:
 
 Human WebAuthn confirmation of task scope arrives in M2, together with the Approval Service.
 
-### 2.3 M2 — approved mutation path
+### 2.3 v1.0 — read-only release
+
+v1.0 adds no new security mechanism. It makes the M1 core deployable by one operator and usable by an agent:
+
+- **One-command setup.** A single command generates a complete single-host production deployment: PKI, service and administrator keys, the configuration trust anchor, admitted configuration skeletons, device enrollment, and systemd units. Administrator signing keys and the CA key go to an offline directory, never to the servers.
+- **Read-only MCP adapter.** A thin adapter over the daemon local API, so agents such as Claude Code call ACF as tools.
+- **A bounded M1 security review**, scoped to the v1.0 trust boundaries, with every high-severity finding fixed before release.
+- **Release packaging and a staging run** against one real read-only API.
+
+**v1.0 is read-only.** Every `classification: mutate` action is refused, as it is today, until M2 delivers per-request human approval. Task authorization uses signed job definitions and trusted schedulers; human task confirmation also arrives with M2.
+
+v1.0 ships with these documented limitations:
+
+- The encrypted local store provides integrity only. There is no rollback anchor, so configuration must acknowledge `rollback_resistance: none`.
+- Key sources are systemd credentials and protected mounted files. There is no TPM, KMS, or interactive unlock.
+- One gateway per environment: no high availability or shared state.
+- Revocation, device enrollment, and job definitions are file-based. There is no administrative API or UI.
+
+**Compatibility promise.** From v1.0 on, the `acf.*/v1` configuration schemas, the capability and checkpoint wire formats (ADR 0003, ADR 0005), and the daemon local API change only in backward-compatible ways. An incompatible change needs a new schema version and a migration note.
+
+### 2.4 M2 — approved mutation path
 
 M2 adds:
 
@@ -86,7 +110,7 @@ M2 adds:
 - A durable operation journal, idempotency keys, and reconciliation after ambiguous downstream outcomes.
 - Cloudflare DNS list and create through a declarative profile and DNS domain types.
 
-### 2.4 M3 — extensions
+### 2.5 M3 — extensions
 
 M3 adds:
 
@@ -466,6 +490,63 @@ Acceptance criteria:
 - A local hash chain alone is never described as sufficient against host compromise.
 - When audit is required and the sink fails, behavior follows the explicit fail-closed policy.
 
+### v1.0 — read-only release
+
+#### WP-17 — One-command setup
+
+Dependencies: M1
+
+Deliverables:
+
+- An `acf-setup init` command that writes one directory per role:
+  - **`gateway/`**: server certificate and key, checkpoint client certificate, audit key, store key, config bundle, profiles and policy with their signatures, trust anchor, device registry, authority and audit key sets, and a systemd unit.
+  - **`control-plane/`**: server certificate and key, signing key, authority configuration, device registry, audit key set, and a systemd unit.
+  - **`agent-<device>/`**: client certificate and key, gateway CA, and a systemd unit for the daemon.
+  - **`offline/`**: CA key and administrator signing keys. These never belong on a server.
+- An `acf-setup admit` command that validates the edited gateway configuration and re-signs every document with the right role key.
+- Units that run each service under its own account with systemd hardening.
+- The control plane loads separately admitted profiles (`--profiles`), as the gateway does.
+- A deployment guide covering single-host and split installs, adding a connector, loading a secret, defining a job, and rotating certificates.
+
+Acceptance criteria:
+
+- From a fresh `acf-setup init`, the gateway, control plane, and daemon start under `production` using exactly the generated unit commands, and the daemon reaches the authority over mTLS.
+- No generated server directory contains the CA key or an administrator signing key.
+- Every generated private key has mode 0600 or stricter.
+
+#### WP-18 — Read-only MCP adapter
+
+Dependencies: WP-17
+
+Deliverables:
+
+- An MCP server over the daemon local API exposing `acf_request_task`, `acf_get_task_status`, and `acf_execute_action`. Discovery tools follow if the daemon gains a describe endpoint.
+- Tool schemas versioned with the local API, plus a client configuration example for Claude Code.
+
+Acceptance criteria:
+
+- No tool response contains a capability, a credential, or a secret reference value that the local API would not return.
+- A tool call with a mutation action returns the gateway's refusal unchanged.
+
+#### WP-19 — v1.0 security review
+
+Dependencies: WP-17
+
+Deliverables:
+
+- A written review of the v1.0 trust boundaries: agent ↔ daemon, daemon ↔ authority, daemon ↔ gateway, administrator ↔ configuration, gateway ↔ store, and gateway ↔ collector.
+- Fixes for every high-severity finding. Remaining findings are recorded with their severity and owner.
+
+#### WP-20 — Release packaging and staging validation
+
+Dependencies: WP-17, WP-18, WP-19
+
+Deliverables:
+
+- Versioned release binaries built from a tagged commit, with checksums.
+- A staging deployment from `acf-setup` serving one real read-only API end to end. The run checks the audit log against its checkpoints.
+- Release notes listing the v1.0 limitations above.
+
 ### M2 — approved mutation path
 
 #### WP-13 — Approval Service and WebAuthn
@@ -601,6 +682,13 @@ flowchart TD
     W11 --> W13
     W13 --> W14[WP-14 Operation journal]
     W14 --> W15[WP-15 Cloudflare DNS]
+    M1 --> W17[WP-17 One-command setup]
+    W17 --> W18[WP-18 Read-only MCP adapter]
+    W17 --> W19[WP-19 v1.0 security review]
+    W18 --> W20[WP-20 Release and staging]
+    W19 --> W20
+    W20 --> V1((v1.0))
+    V1 --> W13
     W15 --> M2((M2))
     M2 --> W16[WP-16 Skills and MCP]
 ```
@@ -610,10 +698,10 @@ Recommended order:
 1. WP-00, then WP-01.
 2. WP-02, WP-06, and the WP-10 interfaces in parallel.
 3. WP-03 and WP-04 in parallel, then WP-05 to complete M0.
-4. WP-07, WP-08, WP-10, WP-11, and WP-12 in parallel, then WP-09 to complete M1.
-5. Security review of M1 before any mutation work.
-6. WP-13, then WP-14, then WP-15 to complete M2.
-7. WP-16 and the other M3 workstreams.
+4. WP-07, WP-08, WP-10, WP-11, and WP-12 in parallel, then WP-09 to complete M1. (Done.)
+5. WP-17, then WP-18 and WP-19 in parallel, then WP-20 to release v1.0. WP-19 is the security review of M1 that precedes any mutation work.
+6. WP-13, then WP-14, then WP-15 to complete M2, prioritized by what v1.0 users need.
+7. WP-16 and the other M3 workstreams. WP-18 already covers the read-only part of WP-16.
 
 ## 8. Parallel agent allocation
 
@@ -704,19 +792,18 @@ Out-of-scope work must not be pulled into an early work package unless it blocks
 
 ## 13. Immediate next actions
 
-1. Merge WP-00 before parallel crate creation.
-2. Freeze the minimum WP-01 identifier, secret-type, and `ResolvedSecret` contracts.
-3. Draft the WP-02 schemas, including secret registrations and the constraint language.
-4. Write ADRs for:
-   - The record encryption algorithm and envelope.
-   - The capability wire encoding.
-   - The `StateStore` consistency requirements.
-5. Build `example.profile.get` as the first semantic-action fixture.
+1. WP-17: one-command setup, including control-plane `--profiles` support.
+2. WP-18 and WP-19 in parallel once WP-17 lands.
+3. WP-20: tag v1.0 after a staging run against a real read-only API.
+
+Deferred until after v1.0, and reprioritized by real use:
+
+- The Approval Service, WebAuthn, and human task confirmation (M2).
+- The KEK with per-record DEKs, the rollback anchor, storage-key rotation, and TPM, KMS, and interactive key sources.
+- High availability and shared state, the Cedar policy backend, and administrative APIs and UI.
+- Audit log rotation tooling, external secret providers, and Skills.
 
 Milestone gates:
 
-- **First coding task:** WP-00.
-- **First cross-team contract:** WP-01.
-- **First demonstrable product proof:** WP-05.
-- **First production-shaped security proof:** M1 (WP-07 through WP-12).
-- **Mutation work:** must not begin until the M1 security review is complete and the WP-13 approval contract has been reviewed.
+- **v1.0:** WP-17 through WP-20. Read-only; mutations stay refused.
+- **Mutation work:** must not begin until WP-19 is complete and the WP-13 approval contract has been reviewed.
