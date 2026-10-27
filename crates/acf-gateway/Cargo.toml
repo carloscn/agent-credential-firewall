@@ -16,6 +16,8 @@ development = ["acf-secrets/in-memory", "acf-identity/development"]
 async-trait.workspace = true
 axum.workspace = true
 clap.workspace = true
+rcgen.workspace = true
+ring.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 serde.workspace = true
@@ -34,8 +36,6 @@ acf-secrets.workspace = true
 acf-state.workspace = true
 
 [dev-dependencies]
-ring.workspace = true
-rcgen.workspace = true
 acf-agent.workspace = true
 acf-identity = { workspace = true, features = ["development"] }
 acf-secrets = { workspace = true, features = ["in-memory"] }
