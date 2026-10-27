@@ -26,7 +26,9 @@ Milestone 1 is in progress:
 
 - WP-12 (done): audit integrity ([ADR 0005](docs/adr/0005-audit-hash-chain-and-checkpoints.md)). Every audit event is hash-chained to the previous one. The gateway signs the chain head and publishes it over mTLS to the control plane's append-only checkpoint collector. `acf-control-plane verify-audit` detects broken links, and truncation or replacement of anything a checkpoint covers. If no checkpoint is accepted within the maximum lag, allowed requests fail closed. Production requires checkpointing. A local hash chain alone is never treated as sufficient.
 
-Release builds (no `development` feature) run with mTLS only. A production gateway passes validation, then stops when it builds its secret providers. The encrypted local provider runtime (WP-07) is still pending in PR #12.
+- WP-07 (done, integrity only): the per-record encrypted local provider ([encrypted-local.md](docs/providers/encrypted-local.md)), administered with `acf-store`. Keys come from systemd credentials or a protected mounted file. No rollback anchor is implemented, so production requires the explicit `rollback_resistance: none` acknowledgement and refuses a configured anchor.
+
+Release builds (no `development` feature) run with mTLS only, and a release build starts under `production` with an admitted configuration and an encrypted local store.
 
 ## Development
 
@@ -62,7 +64,7 @@ Every crate in this workspace handles secrets, identity, authorization, or audit
 | `acf-connectors` | Semantic connectors and domain types | WP-04, WP-15 |
 | `acf-gateway` | Data-plane request lifecycle | WP-05 |
 | `acf-audit` | Redacted, tamper-evident audit events | WP-06, WP-12 |
-| `acf-provider-local` | Encrypted local provider | WP-07 |
+| `acf-provider-local` | Encrypted local provider (integrity only) | WP-07 |
 | `acf-agent` | Endpoint/VPS daemon and CLI | WP-05, WP-08 |
 | `acf-control-plane` | Capability Authority and Approval Service | WP-09, WP-13 |
 | `acf-state` | Replay, revocation, quotas, receipts, journal | WP-10, WP-14 |

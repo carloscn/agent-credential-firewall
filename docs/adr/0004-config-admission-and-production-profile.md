@@ -100,7 +100,7 @@ The outbound network policy under `production` is `NetworkPolicy::production()`:
 
 - **Signing the remaining files.** The Capability Authority's configuration, the device registry, and the authority key set are protected by file ownership and permissions only. Signing them belongs with the Config Registry service.
 - **Configuration database or registry service.** In Milestone 1 the registry is signed files on disk.
-- **The encrypted local provider runtime.** That is WP-07, in PR #12. Until it merges, a production gateway passes validation and then stops when it builds its secret providers, with an explicit message.
+- **The encrypted local provider runtime.** That was WP-07, wired into the gateway after this ADR. See [encrypted-local.md](../providers/encrypted-local.md) §1.2.
 - **Profiles for the authority and the daemon.** Here the profile governs the gateway only.
 
 ## Consequences

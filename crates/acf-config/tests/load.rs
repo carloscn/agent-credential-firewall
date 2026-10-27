@@ -610,7 +610,7 @@ fn production_rules_reject_development_components_and_destinations() {
     let insecure = edit(
         PRODUCTION,
         "key_source: systemd-credential",
-        "key_source: insecure-development",
+        "key_source: insecure-development\n    key_location: /run/acf/dev.key",
     );
     let unanchored = edit(PRODUCTION, "    rollback_anchor: tpm-nv\n", "");
     let acknowledged = edit(
@@ -635,4 +635,33 @@ fn production_rules_reject_development_components_and_destinations() {
             .any(|i| i.contains("rollback"))
     );
     assert_eq!(issues_of(&acknowledged), Vec::<String>::new());
+}
+
+#[test]
+fn encrypted_local_key_locations_are_validated() {
+    for (from, to, needle) in [
+        (
+            "key_source: systemd-credential",
+            "key_source: mounted-file",
+            "absolute path",
+        ),
+        (
+            "key_source: systemd-credential",
+            "key_source: mounted-file\n    key_location: keys/store.key",
+            "absolute path",
+        ),
+        (
+            "key_source: systemd-credential",
+            "key_source: systemd-credential\n    key_location: ../store",
+            "credential name",
+        ),
+    ] {
+        assert_issue(&edit(PRODUCTION, from, to), needle);
+    }
+    for valid in [
+        "key_source: mounted-file\n    key_location: /mnt/keys/acf-store.key",
+        "key_source: systemd-credential\n    key_location: acf-store-production",
+    ] {
+        load_yaml(&edit(PRODUCTION, "key_source: systemd-credential", valid)).unwrap();
+    }
 }

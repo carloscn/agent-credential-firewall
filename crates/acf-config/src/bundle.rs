@@ -135,6 +135,11 @@ pub enum SecretProviderConfig {
         path: String,
         /// Key source.
         key_source: KeySourceKind,
+        /// Where the key source finds the key: a systemd credential name
+        /// (default `acf-store-<namespace>`), or the absolute path of a
+        /// mounted or development key file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_location: Option<String>,
         /// Rollback anchor, if any.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rollback_anchor: Option<RollbackAnchorKind>,
@@ -162,12 +167,31 @@ impl SecretProviderConfig {
             Self::InMemory => {}
             Self::EncryptedLocal {
                 path,
+                key_source,
+                key_location,
                 rollback_anchor,
                 rollback_resistance,
-                ..
             } => {
                 if !path.starts_with('/') || path.split('/').any(|s| s == "..") {
                     problems.push("`path` must be absolute and must not contain `..`".to_owned());
+                }
+                let absolute = |location: &str| {
+                    location.starts_with('/') && !location.split('/').any(|s| s == "..")
+                };
+                match (key_source, key_location.as_deref()) {
+                    (KeySourceKind::MountedFile | KeySourceKind::InsecureDevelopment, location)
+                        if !location.is_some_and(absolute) =>
+                    {
+                        problems
+                            .push("`key_location` must be the key file's absolute path".to_owned());
+                    }
+                    (KeySourceKind::SystemdCredential, Some(name))
+                        if name.is_empty() || name.contains('/') || name == ".." =>
+                    {
+                        problems
+                            .push("`key_location` must be a systemd credential name".to_owned());
+                    }
+                    _ => {}
                 }
                 if rollback_anchor.is_some() && rollback_resistance.is_some() {
                     problems.push(

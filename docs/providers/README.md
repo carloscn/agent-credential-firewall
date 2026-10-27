@@ -71,4 +71,5 @@ Provider-specific authentication credentials and storage keys are bootstrap secr
 ## Implementations
 
 - [Encrypted local provider](encrypted-local.md)
+- [Local provider data migration](local-migration.md)
 - [Bitwarden provider](bitwarden.md)

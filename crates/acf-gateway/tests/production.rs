@@ -3,20 +3,26 @@
 //!
 //! `cargo test --all-features` builds the development flavor, which must
 //! refuse `production`. `cargo test -p acf-gateway --test production` builds
-//! the release flavor, which must pass validation with an admitted
-//! production configuration.
+//! the release flavor, which must start a production gateway: admitted
+//! configuration, an encrypted local store created with `acf-store`, mTLS,
+//! capabilities, and anchored audit.
 
 // Fixture helpers outside `#[test]` functions build known-valid test values.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::os::unix::fs::PermissionsExt;
+#[path = "support/pki.rs"]
+mod pki;
+
+use std::io::{BufRead as _, BufReader, Write as _};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use acf_config::{ConfigRole, ConfigSignature, sha256, signing_message};
 use acf_protocol::{KeyId, base64url_encode};
-use ring::rand::SystemRandom;
+use ring::rand::{SecureRandom, SystemRandom};
 use ring::signature::{Ed25519KeyPair, KeyPair};
 
 const BUNDLE: &str = r#"schema: acf.config/v1
@@ -24,9 +30,10 @@ deployment: { profile: production, environment: production }
 secret_providers:
   production:
     type: encrypted-local
-    path: /var/lib/acf
-    key_source: systemd-credential
-    rollback_anchor: tpm-nv
+    path: {STORE}
+    key_source: mounted-file
+    key_location: {KEY}
+    rollback_resistance: none
 resources:
   "example-api:production":
     connector: example-api
@@ -115,7 +122,12 @@ impl Setup {
             dir,
             admin: Admin::new(),
         };
-        setup.write("bundle.yaml", BUNDLE, Some(ConfigRole::SecretAdmin));
+        setup.write_material();
+        setup.write(
+            "bundle.yaml",
+            &setup.bundle(),
+            Some(ConfigRole::SecretAdmin),
+        );
         setup.write(
             "profiles/example-api.yaml",
             PROFILE,
@@ -128,6 +140,103 @@ impl Setup {
 
     fn path(&self, name: &str) -> PathBuf {
         self.dir.join(name)
+    }
+
+    /// The production bundle, pointing at this setup's store and key.
+    fn bundle(&self) -> String {
+        BUNDLE
+            .replace("{STORE}", self.path("store").to_str().unwrap())
+            .replace("{KEY}", self.path("store.key").to_str().unwrap())
+    }
+
+    fn write_private(&self, name: &str, bytes: &[u8], mode: u32) {
+        let path = self.path(name);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        file.write_all(bytes).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// TLS material, enrolled devices, authority keys, the audit key, and
+    /// the store's root key: everything a production gateway reads.
+    fn write_material(&self) {
+        let ca = pki::Pki::new("acf-production-test-ca");
+        let server = ca.server(&["localhost"]);
+        let device = ca.client("vps-17");
+        let gateway_client = ca.client("gw-1");
+        std::fs::write(self.path("ca.pem"), ca.ca_pem()).unwrap();
+        std::fs::write(self.path("gateway.pem"), &server.certificate_pem).unwrap();
+        self.write_private("gateway.key", server.key_pem.as_bytes(), 0o600);
+        std::fs::write(self.path("client.pem"), &gateway_client.certificate_pem).unwrap();
+        self.write_private("client.key", gateway_client.key_pem.as_bytes(), 0o600);
+        std::fs::write(
+            self.path("devices.yaml"),
+            format!(
+                "schema: acf.devices/v1\ndevices:\n  - {{ device: vps-17, principal: 'workload:vps-17', certificates: [{}] }}\n",
+                acf_identity::thumbprint(&device.der)
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            self.path("authority-keys.yaml"),
+            format!(
+                "schema: acf.authority-keys/v1\nkeys:\n  - {{ kid: authority-1, issuer: acf-authority, alg: EdDSA, public_key: {} }}\n",
+                base64url_encode(self.admin.secrets.public_key().as_ref())
+            ),
+        )
+        .unwrap();
+        self.write_private(
+            "audit.key",
+            acf_identity::generate_pem().unwrap().as_bytes(),
+            0o600,
+        );
+        let mut root_key = [0u8; 32];
+        SystemRandom::new().fill(&mut root_key).unwrap();
+        self.write_private("store.key", &root_key, 0o400);
+    }
+
+    /// Creates the store with `acf-store` and loads the read credential.
+    fn create_store(&self) {
+        let path = |name: &str| self.path(name).to_str().unwrap().to_owned();
+        let store = |args: &[&str]| {
+            Command::new(env!("CARGO_BIN_EXE_acf-store"))
+                .args([
+                    "--config",
+                    &path("bundle.yaml"),
+                    "--profiles",
+                    &path("profiles"),
+                ])
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        };
+        let init = store(&["init", "--namespace", "production"])
+            .wait_with_output()
+            .unwrap();
+        assert!(
+            init.status.success(),
+            "{}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        let mut put = store(&["put", "secret://production/example-api/read"]);
+        put.stdin
+            .take()
+            .unwrap()
+            .write_all(b"production-token\n")
+            .unwrap();
+        let put = put.wait_with_output().unwrap();
+        assert!(
+            put.status.success(),
+            "{}",
+            String::from_utf8_lossy(&put.stderr)
+        );
     }
 
     /// Writes `name`, signed for `role` with that role's key if given.
@@ -164,6 +273,8 @@ impl Setup {
     }
 
     /// Runs the gateway with every production flag; `drop` removes flags.
+    /// Returns whether it started listening (it is then stopped) and its
+    /// standard error.
     fn run(&self, drop: &[&str]) -> (bool, String) {
         let dir = |name: &str| self.path(name).to_str().unwrap().to_owned();
         let flags: Vec<(&str, String)> = vec![
@@ -171,21 +282,22 @@ impl Setup {
             ("--profiles", dir("profiles")),
             ("--policy", dir("policy.yaml")),
             ("--config-trust", dir("trust.yaml")),
-            ("--tls-cert", dir("missing.pem")),
-            ("--tls-key", dir("missing.key")),
-            ("--client-ca", dir("missing-ca.pem")),
-            ("--devices", dir("missing-devices.yaml")),
-            ("--authority-keys", dir("missing-keys.yaml")),
+            ("--listen", "127.0.0.1:0".to_owned()),
+            ("--tls-cert", dir("gateway.pem")),
+            ("--tls-key", dir("gateway.key")),
+            ("--client-ca", dir("ca.pem")),
+            ("--devices", dir("devices.yaml")),
+            ("--authority-keys", dir("authority-keys.yaml")),
             ("--audit-log", dir("audit.jsonl")),
-            ("--audit-key", dir("missing-audit.key")),
+            ("--audit-key", dir("audit.key")),
             ("--audit-kid", "gw-audit-1".to_owned()),
             (
                 "--checkpoint-url",
                 "https://localhost:9/v1/audit/checkpoints".to_owned(),
             ),
-            ("--checkpoint-client-cert", dir("missing-client.pem")),
-            ("--checkpoint-client-key", dir("missing-client.key")),
-            ("--checkpoint-ca", dir("missing-ca.pem")),
+            ("--checkpoint-client-cert", dir("client.pem")),
+            ("--checkpoint-client-key", dir("client.key")),
+            ("--checkpoint-ca", dir("ca.pem")),
             ("--state-db", dir("state.sqlite")),
         ];
         let mut command = Command::new(env!("CARGO_BIN_EXE_acf-gateway"));
@@ -194,11 +306,37 @@ impl Setup {
                 command.args([flag, &value]);
             }
         }
-        let output = command.output().unwrap();
-        (
-            output.status.success(),
-            String::from_utf8_lossy(&output.stderr).into_owned(),
-        )
+        let mut child = command
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let (lines, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if lines.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut text = String::new();
+        let mut started = false;
+        while let Ok(line) = received.recv_timeout(Duration::from_secs(20)) {
+            text.push_str(&line);
+            text.push('\n');
+            if line.contains("listening on") {
+                started = true;
+                break;
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        while let Ok(line) = received.try_recv() {
+            text.push_str(&line);
+            text.push('\n');
+        }
+        (started, text)
     }
 }
 
@@ -216,11 +354,12 @@ fn refusals(stderr: &str) -> Vec<&str> {
 }
 
 #[test]
-fn an_admitted_production_configuration_passes_validation() {
+fn an_admitted_production_configuration_starts() {
     let setup = Setup::new();
-    let (ok, stderr) = setup.run(&[]);
-    assert!(!ok);
+    setup.create_store();
+    let (started, stderr) = setup.run(&[]);
     if cfg!(feature = "development") {
+        assert!(!started);
         assert!(
             stderr.contains("refusing to start under the production profile"),
             "{stderr}"
@@ -231,11 +370,63 @@ fn an_admitted_production_configuration_passes_validation() {
             "{stderr}"
         );
     } else {
-        // Validation passed; startup stops later, when building the
-        // encrypted local provider (WP-07, not yet merged).
-        assert!(!stderr.contains("refusing"), "{stderr}");
+        assert!(started, "{stderr}");
         assert!(
-            stderr.contains("encrypted local provider runtime is not available yet"),
+            stderr.contains("release build, production profile, config sha256:"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("encrypted-local at")
+                && stderr.contains("integrity only, no rollback resistance"),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("production-token"), "{stderr}");
+    }
+}
+
+#[test]
+fn unimplemented_store_guarantees_are_refused_not_ignored() {
+    // A configured rollback anchor would claim a protection the store does
+    // not provide.
+    let setup = Setup::new();
+    setup.create_store();
+    let anchored = setup
+        .bundle()
+        .replace("rollback_resistance: none", "rollback_anchor: tpm-nv");
+    setup.write("bundle.yaml", &anchored, Some(ConfigRole::SecretAdmin));
+    let (started, stderr) = setup.run(&[]);
+    assert!(!started);
+    if cfg!(not(feature = "development")) {
+        assert!(
+            stderr.contains("rollback anchors are not implemented"),
+            "{stderr}"
+        );
+    }
+
+    // A readable root key fails the mounted-file check.
+    let setup = Setup::new();
+    setup.create_store();
+    std::fs::set_permissions(
+        setup.path("store.key"),
+        std::fs::Permissions::from_mode(0o440),
+    )
+    .unwrap();
+    let (started, stderr) = setup.run(&[]);
+    assert!(!started);
+    if cfg!(not(feature = "development")) {
+        assert!(
+            stderr.contains("must not be accessible by group or others"),
+            "{stderr}"
+        );
+    }
+
+    // No store yet: the gateway does not create one.
+    let setup = Setup::new();
+    let (started, stderr) = setup.run(&[]);
+    assert!(!started);
+    if cfg!(not(feature = "development")) {
+        assert!(
+            stderr.contains("create it with `acf-store init`"),
             "{stderr}"
         );
     }
@@ -278,11 +469,19 @@ fn production_refuses_every_missing_control_at_once() {
 #[test]
 fn production_refuses_development_components_in_the_configuration() {
     let setup = Setup::new();
-    let bundle = BUNDLE
-        .replace(
-            "    type: encrypted-local\n    path: /var/lib/acf\n    key_source: systemd-credential\n    rollback_anchor: tpm-nv\n",
-            "    type: in-memory\n",
-        )
+    let encrypted = setup
+        .bundle()
+        .lines()
+        .skip_while(|line| !line.contains("type: encrypted-local"))
+        .take(5)
+        .fold(String::new(), |mut block, line| {
+            block.push_str(line);
+            block.push('\n');
+            block
+        });
+    let bundle = setup
+        .bundle()
+        .replace(&encrypted, "    type: in-memory\n")
         .replace("https://api.example-corp.net", "http://127.0.0.1:8080");
     let profile = PROFILE.replace("https://api.example-corp.net", "http://127.0.0.1:8080");
     setup.write("bundle.yaml", &bundle, Some(ConfigRole::SecretAdmin));
@@ -304,7 +503,8 @@ fn production_refuses_development_components_in_the_configuration() {
     // Inline profiles bypass profile-author admission.
     let setup = Setup::new();
     let inline = format!(
-        "{BUNDLE}profiles:\n  - {}",
+        "{}profiles:\n  - {}",
+        setup.bundle(),
         PROFILE.trim_end().replace('\n', "\n    ")
     );
     setup.write("bundle.yaml", &inline, Some(ConfigRole::SecretAdmin));
@@ -353,7 +553,7 @@ fn documents_must_be_admitted_for_their_own_role() {
     let setup = Setup::new();
     setup.sign(
         "bundle.yaml",
-        BUNDLE,
+        &setup.bundle(),
         ConfigRole::SecretAdmin,
         ConfigRole::ProfileAuthor,
     );
@@ -364,7 +564,7 @@ fn documents_must_be_admitted_for_their_own_role() {
     let setup = Setup::new();
     setup.sign(
         "bundle.yaml",
-        BUNDLE,
+        &setup.bundle(),
         ConfigRole::PolicyAdmin,
         ConfigRole::SecretAdmin,
     );

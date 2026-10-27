@@ -53,6 +53,10 @@ required-features = ["development"]
 name = "tls"
 required-features = ["development"]
 
+[[test]]
+name = "encrypted_store"
+required-features = ["development"]
+
 [[example]]
 name = "dev-pki"
 required-features = ["development"]
