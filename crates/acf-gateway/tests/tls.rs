@@ -163,6 +163,7 @@ async fn start(ca: Pki, enrolled: &Issued) -> Server {
                 id: "gw".to_owned(),
                 build: "development".to_owned(),
                 deployment_profile: "development".to_owned(),
+                config_digest: None,
             },
         },
         StateSettings::new(
