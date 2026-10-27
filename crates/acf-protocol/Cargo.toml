@@ -10,6 +10,7 @@ repository.workspace = true
 # acf-protocol must never depend on acf-secrets: response models are then
 # structurally unable to carry secret material (enforced in deny.toml).
 [dependencies]
+base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

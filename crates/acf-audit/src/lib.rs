@@ -9,13 +9,33 @@
 //! parameter values enter only through [`AuditParam`], which the gateway fills
 //! according to each parameter's audit classification.
 //!
-//! Tamper evidence (hash chain and external checkpoints) arrives with WP-12.
+//! Tamper evidence (ADR 0005): [`ChainedJsonSink`] links every event to the
+//! previous one by hash, [`CheckpointSigner`] signs the chain head, and a
+//! collector outside the gateway host keeps the signed checkpoints.
+//! [`verify_log`] and [`check_checkpoints`] detect broken links, truncation,
+//! and replacement of anything a checkpoint covers. A local chain alone is
+//! never sufficient against a compromised host.
+
+mod chain;
+mod checkpoint;
+
+pub use chain::{
+    AnchorState, ChainError, ChainHead, ChainLink, ChainedJsonSink, VerifiedLog, genesis,
+    line_hash, verify_log,
+};
+pub use checkpoint::{
+    AUDIT_KEYS_SCHEMA, AuditKeyEntry, AuditKeys, AuditKeysDocument, CHECKPOINT_SCHEMA,
+    CheckpointEnvelope, CheckpointError, CheckpointFinding, CheckpointPublisher, CheckpointSigner,
+    CheckpointStatement, PublishError, check_checkpoints, run_checkpoints,
+};
 
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::Mutex;
 
-use acf_protocol::{ActionName, DeviceId, PrincipalId, RequestId, ResourceId, TaskId};
+use acf_protocol::{
+    ActionName, CapabilityId, DeviceId, PrincipalId, RequestId, ResourceId, TaskId,
+};
 use async_trait::async_trait;
 use ring::hmac;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -59,6 +79,10 @@ pub struct GatewayInfo {
     pub build: String,
     /// Deployment profile.
     pub deployment_profile: String,
+    /// Digest of the admitted configuration (ADR 0004); absent when the
+    /// configuration was not admitted (development).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_digest: Option<String>,
 }
 
 /// A parameter as it appears in an event.
@@ -114,6 +138,9 @@ pub struct AuditEvent {
     /// Device, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device: Option<DeviceId>,
+    /// Capability `jti`, for capability-scoped tasks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capability: Option<CapabilityId>,
     /// Requested action.
     pub action: ActionName,
     /// Requested resource.
@@ -138,6 +165,9 @@ pub struct AuditEvent {
     /// Parameters, filtered by audit classification.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, AuditParam>,
+    /// Hash-chain link, set by a chained sink (ADR 0005).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain: Option<ChainLink>,
     /// Downstream result, on outcome events.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub downstream: Option<Downstream>,
@@ -165,6 +195,7 @@ impl AuditEvent {
             task_id,
             principal: None,
             device: None,
+            capability: None,
             action,
             resource,
             verdict,
@@ -174,6 +205,7 @@ impl AuditEvent {
             connector: None,
             secret_ref: None,
             params: BTreeMap::new(),
+            chain: None,
             downstream: None,
         }
     }
@@ -235,6 +267,13 @@ pub enum AuditError {
     /// The sink could not record the event.
     #[error("audit sink unavailable")]
     Unavailable,
+    /// No checkpoint has been accepted within the maximum lag, so the sink
+    /// refuses new events (ADR 0005).
+    #[error("audit log is not anchored by a recent checkpoint")]
+    Unanchored,
+    /// An existing audit file cannot be continued.
+    #[error("cannot continue audit log: {0}")]
+    Continue(String),
     /// No secure random source.
     #[error("no secure random source available")]
     Random,
@@ -316,6 +355,7 @@ mod tests {
                 id: "gw".to_owned(),
                 build: "development".to_owned(),
                 deployment_profile: "development".to_owned(),
+                config_digest: None,
             },
             RequestId::new("req-1").unwrap(),
             TaskId::new("task-1").unwrap(),

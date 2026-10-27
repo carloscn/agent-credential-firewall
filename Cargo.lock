@@ -6,6 +6,7 @@ version = 4
 name = "acf-agent"
 version = "0.0.0"
 dependencies = [
+ "acf-identity",
  "acf-protocol",
  "axum",
  "clap",
@@ -43,6 +44,7 @@ version = "0.0.0"
 dependencies = [
  "acf-protocol",
  "acf-secrets",
+ "ring",
  "serde",
  "serde-saphyr",
  "serde_json",
@@ -72,9 +74,41 @@ dependencies = [
  "acf-audit",
  "acf-config",
  "acf-identity",
+ "acf-protocol",
+ "axum",
+ "base64",
+ "clap",
+ "getrandom 0.4.3",
+ "ring",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "time",
+ "tokio",
+]
+
+[[package]]
+name = "acf-e2e"
+version = "0.0.0"
+dependencies = [
+ "acf-agent",
+ "acf-audit",
+ "acf-config",
+ "acf-connectors",
+ "acf-control-plane",
+ "acf-gateway",
+ "acf-identity",
  "acf-policy",
  "acf-protocol",
+ "acf-secrets",
  "acf-state",
+ "axum",
+ "rcgen",
+ "reqwest",
+ "rustls",
+ "serde_json",
+ "time",
+ "tokio",
 ]
 
 [[package]]
@@ -95,17 +129,15 @@ dependencies = [
  "axum",
  "clap",
  "getrandom 0.4.3",
- "hyper",
- "hyper-util",
  "rcgen",
  "reqwest",
+ "ring",
  "rustls",
  "serde",
  "serde_json",
  "thiserror",
  "time",
  "tokio",
- "tokio-rustls",
 ]
 
 [[package]]
@@ -114,10 +146,16 @@ version = "0.0.0"
 dependencies = [
  "acf-protocol",
  "async-trait",
+ "axum",
+ "base64",
+ "hyper",
+ "hyper-util",
  "ring",
+ "rustls",
  "serde",
  "thiserror",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]
@@ -136,6 +174,7 @@ dependencies = [
 name = "acf-protocol"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "serde",
  "serde_json",
  "thiserror",
@@ -573,7 +612,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1304,7 +1343,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1515,7 +1554,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2143,7 +2182,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

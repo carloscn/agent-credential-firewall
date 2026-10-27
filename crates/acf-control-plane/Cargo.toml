@@ -8,12 +8,22 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
+axum.workspace = true
+base64.workspace = true
+clap.workspace = true
+getrandom.workspace = true
+ring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
 acf-audit.workspace = true
 acf-config.workspace = true
-acf-identity.workspace = true
-acf-policy.workspace = true
+acf-identity = { workspace = true, features = ["tls"] }
 acf-protocol.workspace = true
-acf-state.workspace = true
+
+[dev-dependencies]
 
 [lints]
 workspace = true

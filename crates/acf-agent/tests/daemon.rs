@@ -67,7 +67,7 @@ fn start(dir: &TempDir, allowed: Option<BTreeSet<u32>>) -> PathBuf {
     tokio::spawn(daemon::serve(
         socket,
         allowed,
-        daemon::router(unreachable_gateway()),
+        daemon::router(unreachable_gateway(), None),
     ));
     path
 }

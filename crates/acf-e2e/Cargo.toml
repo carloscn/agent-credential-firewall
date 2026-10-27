@@ -1,0 +1,33 @@
+[package]
+name = "acf-e2e"
+description = "End-to-end tests across the daemon, Capability Authority, and gateway. Test-only."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+# The only crate allowed to link both the Capability Authority (which signs)
+# and the gateway (which must not); see deny.toml.
+[dev-dependencies]
+axum.workspace = true
+rcgen.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+serde_json.workspace = true
+time.workspace = true
+tokio.workspace = true
+acf-agent.workspace = true
+acf-audit.workspace = true
+acf-config.workspace = true
+acf-connectors.workspace = true
+acf-control-plane.workspace = true
+acf-gateway = { workspace = true, features = ["development"] }
+acf-identity = { workspace = true, features = ["development"] }
+acf-policy.workspace = true
+acf-protocol.workspace = true
+acf-secrets = { workspace = true, features = ["in-memory"] }
+acf-state.workspace = true
+
+[lints]
+workspace = true

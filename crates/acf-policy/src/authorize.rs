@@ -91,6 +91,8 @@ pub enum DecisionReason {
     CapabilityWrongAudience,
     /// `cnf.x5t#S256` does not match the connection's certificate.
     CertificateMismatch,
+    /// `sub` is not the principal enrolled for the connection's certificate.
+    CapabilitySubjectMismatch,
     /// The request names a different task than the capability.
     CapabilityTaskMismatch,
     /// No grant covers this action on this resource.
@@ -123,6 +125,7 @@ impl DecisionReason {
             Self::CapabilityExpired => "capability_expired",
             Self::CapabilityWrongAudience => "capability_wrong_audience",
             Self::CertificateMismatch => "certificate_mismatch",
+            Self::CapabilitySubjectMismatch => "capability_subject_mismatch",
             Self::CapabilityTaskMismatch => "capability_task_mismatch",
             Self::CapabilityNotGranted => "capability_not_granted",
             Self::CapabilityAmbiguousGrant => "capability_ambiguous_grant",
@@ -148,13 +151,13 @@ impl DecisionReason {
     pub fn denial(&self) -> DenialReason {
         match self {
             Self::IdentityAssuranceRejected => DenialReason::Unauthenticated,
-            Self::DevelopmentTaskRejected => DenialReason::CapabilityInvalid,
             Self::CapabilityNotYetValid | Self::CapabilityExpired => {
                 DenialReason::CapabilityExpired
             }
-            Self::CapabilityWrongAudience | Self::CapabilityAmbiguousGrant => {
-                DenialReason::CapabilityInvalid
-            }
+            Self::DevelopmentTaskRejected
+            | Self::CapabilityWrongAudience
+            | Self::CapabilitySubjectMismatch
+            | Self::CapabilityAmbiguousGrant => DenialReason::CapabilityInvalid,
             Self::CertificateMismatch => DenialReason::CertificateMismatch,
             Self::CapabilityTaskMismatch
             | Self::CapabilityNotGranted
@@ -366,6 +369,9 @@ impl Authorizer {
         }
         if request.identity.certificate.as_ref() != Some(&claims.cnf.x5t_s256) {
             return Err(DecisionReason::CertificateMismatch);
+        }
+        if claims.sub != request.identity.principal {
+            return Err(DecisionReason::CapabilitySubjectMismatch);
         }
         if &claims.task.id != request.task_id {
             return Err(DecisionReason::CapabilityTaskMismatch);

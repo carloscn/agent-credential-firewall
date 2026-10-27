@@ -1,4 +1,4 @@
-# WP-08 demo: daemon and mTLS
+# Milestone 1 demo: daemon, mTLS, and task capabilities
 
 The same `example.profile.get` read as the [Milestone 0 demo](../m0/README.md), with three changes:
 
@@ -51,6 +51,127 @@ The result is the same as in M0. The audit log's decision event now records `"pr
 - Replace the thumbprint in `devices.yaml` and wait 5 seconds. The next action is denied with `unauthenticated`, because the certificate still chains to the CA but is no longer enrolled. Put the thumbprint back to restore access. Rotation works the same way: list both thumbprints, switch the daemon to the new certificate, then remove the old one.
 - `chmod 640 "$PKI/vps-17.key"` and restart the daemon. It refuses to start.
 - Run `acf-agent task create --pid 1 …` and use the handle from your shell. The daemon answers `unknown_task`: the handle is bound to PID 1.
+
+## Task capabilities (WP-09)
+
+Add a Capability Authority, and the gateway refuses any request without a capability it signed ([ADR 0003](../../docs/adr/0003-capability-wire-encoding.md)). Continuing from the shell above, after stopping the gateway and the daemon:
+
+```bash
+cargo build -p acf-control-plane
+
+# Keys: one to sign job definitions (an administrator's), one for the authority.
+target/debug/acf-control-plane keygen --out "$PKI/admin.key" > "$PKI/admin.pub"
+target/debug/acf-control-plane keygen --out "$PKI/authority.key" > /dev/null
+sed "s/ADMIN_PUBLIC_KEY/$(cat "$PKI/admin.pub")/" examples/m1/authority.yaml > "$PKI/authority.yaml"
+
+# An administrator signs the job definition; the authority refuses unsigned jobs.
+mkdir -p "$PKI/jobs" && cp examples/m1/jobs/profile-check.yaml "$PKI/jobs/"
+target/debug/acf-control-plane sign-job --key "$PKI/admin.key" --kid admin-1 "$PKI/jobs/profile-check.yaml"
+
+# Gateways get only the public key.
+target/debug/acf-control-plane trust-entry --signing-key "$PKI/authority.key" \
+  --kid authority-1 --issuer acf-authority-dev > "$PKI/authority-keys.yaml"
+
+target/debug/acf-control-plane serve \
+  --authority-config "$PKI/authority.yaml" --bundle examples/m0/config.yaml --jobs "$PKI/jobs" \
+  --signing-key "$PKI/authority.key" --kid authority-1 --listen 127.0.0.1:8444 \
+  --tls-cert "$PKI/gateway.pem" --tls-key "$PKI/gateway.key" \
+  --client-ca "$PKI/ca.pem" --devices "$PKI/devices.yaml" &
+
+target/debug/acf-gateway \
+  --config examples/m0/config.yaml --policy examples/m1/policy.yaml \
+  --tls-cert "$PKI/gateway.pem" --tls-key "$PKI/gateway.key" \
+  --client-ca "$PKI/ca.pem" --devices "$PKI/devices.yaml" \
+  --authority-keys "$PKI/authority-keys.yaml" \
+  --secret-env secret://development/example-api/read=DEMO_TOKEN \
+  --audit-log /tmp/acf-m1-audit.jsonl --state-db /tmp/acf-m1-state.sqlite &
+
+target/debug/acf-agent daemon \
+  --socket "$RUN/acf.sock" \
+  --gateway https://localhost:8443 --authority https://localhost:8444 \
+  --client-cert "$PKI/vps-17.pem" --client-key "$PKI/vps-17.key" \
+  --gateway-ca "$PKI/ca.pem" &
+
+# The agent proposes a task under the signed job and gets a handle.
+HANDLE=$(target/debug/acf-agent task create --socket "$RUN/acf.sock" --task demo-task --job profile-check \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["taskHandle"])')
+target/debug/acf-agent action execute --socket "$RUN/acf.sock" --task-handle "$HANDLE" \
+  --action example.profile.get --resource example-api:development
+```
+
+- `task create` prints the handle, the effective grants, the limits (`maxRequests: 20` from the job), and the expiry. It never prints the capability, which stays in the daemon.
+- The handle works for many requests until the capability expires or reaches its limit. Each audit event records the capability's `jti`.
+- `--grant example.records.create@example-api:development` proposes more than vps-17 is entitled to. Nothing survives the intersection, so the authority refuses with `scope_empty`.
+- Without `--job`, the daemon refuses to open a task, because it cannot be scoped. A daemon started without `--authority` opens unscoped tasks, and this gateway rejects their requests with `capability_invalid`.
+- Edit the job file without re-signing it, and the authority refuses to start.
+
+## Configuration admission (WP-11)
+
+The gateway can require that every configuration document be admitted ([ADR 0004](../../docs/adr/0004-config-admission-and-production-profile.md)). There are three roles:
+
+- `secret-admin` admits the bundle: providers, resources, and secret use bindings.
+- `profile-author` admits each connector profile, one file each, in a `--profiles` directory.
+- `policy-admin` admits the policy.
+
+```bash
+CP=target/debug/acf-control-plane
+$CP keygen --out profiles.key > profiles.pub
+$CP keygen --out secrets.key > secrets.pub
+cat > trust.yaml <<EOF
+schema: acf.config-trust/v1
+signers:
+  - { kid: profiles-1, public_key: $(cat profiles.pub), roles: [profile-author] }
+  - { kid: secrets-1, public_key: $(cat secrets.pub), roles: [secret-admin, policy-admin] }
+EOF
+
+# Each admit checks the document for its role, prints its digest, and writes <file>.sig.
+$CP admit --role profile-author --key profiles.key --kid profiles-1 profiles/example-api.yaml
+$CP admit --role secret-admin --key secrets.key --kid secrets-1 bundle.yaml
+$CP admit --role policy-admin --key secrets.key --kid secrets-1 policy.yaml
+
+target/debug/acf-gateway --config bundle.yaml --profiles profiles --policy policy.yaml \
+  --config-trust trust.yaml …
+```
+
+- The startup line and every audit event carry `config_digest`, a digest of every admitted document.
+- Edit `profiles/example-api.yaml` after admitting it and the gateway refuses to start: the signature no longer matches. Drafts, such as a profile an agent wrote, stay out of `profiles/` until someone admits them.
+- A key that holds only `profile-author` cannot admit the bundle, and a signature made for one role does not verify for another.
+- A pin, `pins: [{ role: policy-admin, sha256: "sha256:…" }]` in the trust anchor, admits the exact bytes without a signature.
+- Change the bundle to `profile: production` and a development build refuses to start. It lists every rule the setup breaks: the build flavor, plaintext, no capabilities, no audit sink, the in-memory provider, and `http://` loopback destinations.
+
+## Audit integrity (WP-12)
+
+Every audit event carries `chain: {log, seq, prev}`, so changing or removing a line breaks the chain. A host attacker can still truncate the log or rebuild the whole chain. The external anchor is a signed checkpoint of the chain head, held by the control plane ([ADR 0005](../../docs/adr/0005-audit-hash-chain-and-checkpoints.md)).
+
+```bash
+# The gateway needs its own client certificate (gw-1) and an audit signing key.
+target/debug/examples/dev-pki "$PKI" vps-17 gw-1
+$CP keygen --out "$PKI/gw-audit.key" > "$PKI/gw-audit.pub"
+cat > "$PKI/audit-keys.yaml" <<EOF
+schema: acf.audit-keys/v1
+keys:
+  - { kid: gw-audit-1, gateway: acf-gateway-dev, principal: "workload:gw-1", public_key: $(cat "$PKI/gw-audit.pub") }
+EOF
+
+# The control plane collects checkpoints. Keep the store off the gateway's host.
+$CP serve … --audit-keys "$PKI/audit-keys.yaml" --checkpoint-store /var/lib/acf-checkpoints
+
+# The gateway signs and publishes its chain head every --checkpoint-interval-secs.
+target/debug/acf-gateway … --audit-log /tmp/acf-m1-audit.jsonl \
+  --audit-key "$PKI/gw-audit.key" --audit-kid gw-audit-1 \
+  --checkpoint-url https://localhost:8444/v1/audit/checkpoints \
+  --checkpoint-client-cert "$PKI/gw-1.pem" --checkpoint-client-key "$PKI/gw-1.key" \
+  --checkpoint-ca "$PKI/ca.pem"
+
+# Later, anywhere the log and the store are both readable:
+$CP verify-audit --log /tmp/acf-m1-audit.jsonl \
+  --checkpoints /var/lib/acf-checkpoints --audit-keys "$PKI/audit-keys.yaml"
+```
+
+- `verify-audit` checks every link and every checkpoint signature. It reports how many events come after the newest checkpoint, which are protected by the local chain only.
+- Cut the newest events (`head -n 4`) and the local chain still verifies, but `verify-audit` fails: `checkpoint at seq 5 but the log has only 4 events: truncated`. A rewritten history with a recomputed chain fails the same way, as `replaced`.
+- The collector refuses a different head for a position it has already accepted (`409 checkpoint_conflict`), including one signed with the gateway's own key. It also refuses checkpoints from any certificate other than the key's principal.
+- Stop the control plane and allowed requests start failing with `audit_unavailable` after `--checkpoint-max-lag-secs` (default 300). Denials are still answered.
 
 ## Production topology
 

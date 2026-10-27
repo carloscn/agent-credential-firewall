@@ -1,20 +1,21 @@
-//! TLS 1.3 listener with mandatory client certificates (ADR 0002).
+//! TLS 1.3 listener with mandatory client certificates (ADR 0002), shared by
+//! the gateway and the Capability Authority.
 //!
-//! The gateway terminates TLS itself. The verified leaf certificate's
+//! The service terminates TLS itself. The verified leaf certificate's
 //! thumbprint is attached to every request on the connection as
 //! [`ConnectionInfo`]; nothing a client sends in HTTP can change it.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use acf_identity::{ConnectionInfo, thumbprint};
+use crate::{ConnectionInfo, thumbprint};
 use axum::{Extension, Router};
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{NoServerSessionStorage, WebPkiClientVerifier};
-use rustls::{RootCertStore, ServerConfig};
+use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
@@ -84,6 +85,47 @@ pub fn server_config(
     config.send_tls13_tickets = 0;
     config.session_storage = Arc::new(NoServerSessionStorage {});
     Ok(Arc::new(config))
+}
+
+/// Builds a client configuration for calling another ACF service: TLS 1.3
+/// only, trusting only `server_ca_pem` (never the system roots), presenting
+/// `certificate_chain_pem` with `private_key_pem`, no 0-RTT.
+///
+/// # Errors
+///
+/// Returns [`TlsError`] if any input is malformed.
+pub fn client_config(
+    certificate_chain_pem: &[u8],
+    private_key_pem: &[u8],
+    server_ca_pem: &[u8],
+) -> Result<ClientConfig, TlsError> {
+    let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(certificate_chain_pem)
+        .collect::<Result<_, _>>()
+        .map_err(|_| TlsError::Certificate)?;
+    if chain.is_empty() {
+        return Err(TlsError::Certificate);
+    }
+    let key = PrivateKeyDer::from_pem_slice(private_key_pem).map_err(|_| TlsError::PrivateKey)?;
+    let mut roots = RootCertStore::empty();
+    for certificate in CertificateDer::pem_slice_iter(server_ca_pem) {
+        roots
+            .add(certificate.map_err(|_| TlsError::ClientCa)?)
+            .map_err(|_| TlsError::ClientCa)?;
+    }
+    if roots.is_empty() {
+        return Err(TlsError::ClientCa);
+    }
+    let mut config = ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .map_err(|e| TlsError::Config(e.to_string()))?
+    .with_root_certificates(roots)
+    .with_client_auth_cert(chain, key)
+    .map_err(|e| TlsError::Config(e.to_string()))?;
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    config.enable_early_data = false;
+    Ok(config)
 }
 
 /// Accepts TLS connections and serves `router` on each.

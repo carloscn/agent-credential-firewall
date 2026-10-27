@@ -6,15 +6,18 @@
 
 mod action;
 mod approval;
+mod authority;
 mod capability;
 mod constraints;
 mod digest;
 mod ids;
 mod local;
 mod operation;
+mod token;
 
 pub use action::{ActionRequest, ActionResponse, DenialReason, FailureReason};
 pub use approval::{APPROVAL_OBJECT_VERSION, ApprovalObject};
+pub use authority::{AuthorityError, AuthorityErrorCode, BasisRequest, TaskIssued, TaskProposal};
 pub use capability::{
     AuthorizationBasis, Confirmation, Grant, HumanAuthMethod, Limits, TaskCapabilityClaims,
     TaskInfo,
@@ -26,10 +29,15 @@ pub use constraints::{
 pub use digest::{CertificateThumbprint, DigestError, Sha256Digest};
 pub use ids::{
     ActionName, AgentId, ApprovalId, ApprovalNonce, AudienceId, CapabilityId, DeviceId, IdError,
-    IdempotencyKey, IssuerId, MAX_ID_LEN, OperationId, PrincipalId, RequestId, ResourceId,
-    TaskHandle, TaskId,
+    IdempotencyKey, IssuerId, JobId, KeyId, MAX_ID_LEN, OperationId, PrincipalId, RequestId,
+    ResourceId, TaskHandle, TaskId,
 };
 pub use local::{
     CreateTaskRequest, LocalActionRequest, LocalError, LocalErrorCode, TaskState, TaskStatus,
 };
 pub use operation::{OperationState, OperationStatus};
+pub use token::{
+    CAPABILITY_HEADER, CAPABILITY_TYPE, CapabilityHeader, MAX_CAPABILITY_BYTES, SignatureAlgorithm,
+    TokenError, UnverifiedCapability, base64url_decode, base64url_encode, encode_capability,
+    parse_claims, split_capability,
+};

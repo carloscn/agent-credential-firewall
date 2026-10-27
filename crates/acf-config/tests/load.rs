@@ -7,7 +7,8 @@
 use std::fmt::Write as _;
 
 use acf_config::{
-    ConfigError, ParamErrorKind, ValidatedConfig, load_yaml, parse_yaml, validate_params,
+    ConfigError, ConfigRole, ParamErrorKind, ValidatedConfig, check_document, load_bundle,
+    load_yaml, parse_yaml, production_issues, validate_params,
 };
 use acf_protocol::{ActionName, ResourceId};
 use serde_json::json;
@@ -542,4 +543,96 @@ fn issues_are_reported_together() {
         "classification: mutate\n        approval: none\n",
     );
     assert!(issues(&source).len() >= 2);
+}
+
+/// Splits a fixture into a bundle without inline profiles and one profile
+/// document per connector.
+fn split_profiles(source: &str) -> (String, Vec<String>) {
+    let start = source.find("profiles:\n").unwrap();
+    let end = source.find("\nresources:").unwrap();
+    let section = &source[start + "profiles:\n".len()..end];
+    let profiles = section
+        .split("\n  - schema:")
+        .filter(|chunk| !chunk.trim().is_empty())
+        .map(|chunk| {
+            let chunk = chunk.trim_start_matches("  - schema:");
+            let body: String = format!("schema:{chunk}")
+                .lines()
+                .map(|line| line.strip_prefix("    ").unwrap_or(line))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("{}\n", body.trim_end())
+        })
+        .collect();
+    (
+        format!("{}{}", &source[..start], &source[end + 1..]),
+        profiles,
+    )
+}
+
+#[test]
+fn profiles_can_live_in_their_own_documents() {
+    let (bundle, profiles) = split_profiles(PRODUCTION);
+    assert_eq!(profiles.len(), 1);
+    let refs: Vec<&str> = profiles.iter().map(String::as_str).collect();
+    let config = load_bundle(&bundle, &refs).unwrap();
+    assert_eq!(config.inline_profile_count(), 0);
+    assert_eq!(config.profiles().count(), 1);
+    assert_eq!(load_yaml(PRODUCTION).unwrap().inline_profile_count(), 1);
+    // The bundle alone no longer validates: its resource names a missing profile.
+    assert!(load_bundle(&bundle, &[]).is_err());
+    // The same connector twice is a duplicate, inline or not.
+    assert!(load_bundle(PRODUCTION, &refs).is_err());
+    check_document(ConfigRole::ProfileAuthor, &profiles[0]).unwrap();
+    check_document(ConfigRole::SecretAdmin, &bundle).unwrap();
+    assert!(check_document(ConfigRole::ProfileAuthor, &bundle).is_err());
+    assert!(check_document(ConfigRole::PolicyAdmin, &bundle).is_err());
+}
+
+#[test]
+fn the_production_fixture_meets_the_production_rules() {
+    assert_eq!(production_issues(&load_yaml(PRODUCTION).unwrap()), vec![]);
+}
+
+#[test]
+fn production_rules_reject_development_components_and_destinations() {
+    let found: Vec<String> = production_issues(&load_yaml(DEVELOPMENT).unwrap())
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    for needle in ["in-memory provider", "base_url", "use_binding.origins"] {
+        assert!(
+            found.iter().any(|i| i.contains(needle)),
+            "{needle}: {found:#?}"
+        );
+    }
+
+    let insecure = edit(
+        PRODUCTION,
+        "key_source: systemd-credential",
+        "key_source: insecure-development",
+    );
+    let unanchored = edit(PRODUCTION, "    rollback_anchor: tpm-nv\n", "");
+    let acknowledged = edit(
+        PRODUCTION,
+        "rollback_anchor: tpm-nv",
+        "rollback_resistance: none",
+    );
+    let issues_of = |source: &str| -> Vec<String> {
+        production_issues(&load_yaml(source).unwrap())
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    };
+    assert!(
+        issues_of(&insecure)
+            .iter()
+            .any(|i| i.contains("insecure-development"))
+    );
+    assert!(
+        issues_of(&unanchored)
+            .iter()
+            .any(|i| i.contains("rollback"))
+    );
+    assert_eq!(issues_of(&acknowledged), Vec::<String>::new());
 }

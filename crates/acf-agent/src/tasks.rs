@@ -1,17 +1,21 @@
 //! Opaque task handles, bound to the caller's UID and optionally a PID.
+//!
+//! Each handle may hold the task's capability (ADR 0003). The capability
+//! stays here: it is attached to gateway requests and never returned
+//! through the local API.
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
+use std::fmt::{self, Write as _};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
-use acf_protocol::{TaskHandle, TaskId, TaskState, TaskStatus};
+use acf_protocol::{Grant, Limits, TaskHandle, TaskId, TaskIssued, TaskState, TaskStatus};
+use time::{Duration, OffsetDateTime};
 
 /// Most open tasks one UID may hold.
 pub const MAX_TASKS_PER_UID: usize = 256;
 
-/// How long a handle stays valid.
-pub const TASK_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+/// How long a handle stays valid; shorter when its capability expires first.
+pub const TASK_TTL: Duration = Duration::hours(12);
 
 /// Kernel-reported credentials of the process on the other end of the socket.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -24,19 +28,59 @@ pub struct Peer {
     pub pid: Option<u32>,
 }
 
+/// A capability token. Its `Debug` output is redacted.
+#[derive(Clone)]
+struct Capability(String);
+
+impl fmt::Debug for Capability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Capability(<redacted>)")
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Entry {
     task_id: TaskId,
     uid: u32,
     pid: Option<u32>,
-    expires: Instant,
+    expires: OffsetDateTime,
+    capability: Option<Capability>,
+    grants: Vec<Grant>,
+    limits: Option<Limits>,
 }
 
 impl Entry {
-    fn usable_by(&self, peer: Peer, now: Instant) -> bool {
+    fn usable_by(&self, peer: Peer, now: OffsetDateTime) -> bool {
         now < self.expires
             && self.uid == peer.uid
             && self.pid.is_none_or(|pid| peer.pid == Some(pid))
+    }
+
+    fn status(&self, handle: &TaskHandle) -> TaskStatus {
+        TaskStatus {
+            task_handle: handle.clone(),
+            task_id: self.task_id.clone(),
+            state: TaskState::Active,
+            expires_at: self.expires,
+            grants: self.grants.clone(),
+            limits: self.limits,
+        }
+    }
+}
+
+/// What the daemon needs to forward a request for a task.
+#[derive(Clone, Debug)]
+pub struct ResolvedTask {
+    /// The task identifier.
+    pub task_id: TaskId,
+    capability: Option<Capability>,
+}
+
+impl ResolvedTask {
+    /// The capability token, if the task is scoped.
+    #[must_use]
+    pub fn capability(&self) -> Option<&str> {
+        self.capability.as_ref().map(|c| c.0.as_str())
     }
 }
 
@@ -69,7 +113,8 @@ fn new_handle() -> Result<TaskHandle, TaskError> {
 }
 
 impl TaskRegistry {
-    /// Opens a task for `peer`, restricted to `pid` if given.
+    /// Opens a task for `peer`, restricted to `pid` if given. `issued` is
+    /// the authority's capability; `None` opens an unscoped development task.
     ///
     /// # Errors
     ///
@@ -80,9 +125,25 @@ impl TaskRegistry {
         peer: Peer,
         task_id: TaskId,
         pid: Option<u32>,
+        issued: Option<TaskIssued>,
     ) -> Result<TaskStatus, TaskError> {
-        let now = Instant::now();
+        let now = OffsetDateTime::now_utc();
         let handle = new_handle()?;
+        let mut entry = Entry {
+            task_id,
+            uid: peer.uid,
+            pid,
+            expires: now + TASK_TTL,
+            capability: None,
+            grants: Vec::new(),
+            limits: None,
+        };
+        if let Some(issued) = issued {
+            entry.expires = entry.expires.min(issued.expires_at);
+            entry.capability = Some(Capability(issued.capability));
+            entry.grants = issued.grants;
+            entry.limits = Some(issued.limits);
+        }
         let mut entries = self
             .entries
             .lock()
@@ -91,38 +152,37 @@ impl TaskRegistry {
         if entries.values().filter(|e| e.uid == peer.uid).count() >= MAX_TASKS_PER_UID {
             return Err(TaskError::TooMany);
         }
-        entries.insert(
-            handle.clone(),
-            Entry {
-                task_id: task_id.clone(),
-                uid: peer.uid,
-                pid,
-                expires: now + TASK_TTL,
-            },
-        );
-        Ok(TaskStatus {
-            task_handle: handle,
-            task_id,
-            state: TaskState::Active,
-        })
+        let status = entry.status(&handle);
+        entries.insert(handle, entry);
+        Ok(status)
     }
 
-    /// The task behind `handle`, if `peer` may use it. Unknown, expired, and
-    /// foreign handles are indistinguishable.
-    #[must_use]
-    pub fn get(&self, peer: Peer, handle: &TaskHandle) -> Option<TaskStatus> {
+    fn find<T>(&self, peer: Peer, handle: &TaskHandle, f: impl FnOnce(&Entry) -> T) -> Option<T> {
         let entries = self
             .entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         entries
             .get(handle)
-            .filter(|entry| entry.usable_by(peer, Instant::now()))
-            .map(|entry| TaskStatus {
-                task_handle: handle.clone(),
-                task_id: entry.task_id.clone(),
-                state: TaskState::Active,
-            })
+            .filter(|entry| entry.usable_by(peer, OffsetDateTime::now_utc()))
+            .map(f)
+    }
+
+    /// The task behind `handle`, if `peer` may use it. Unknown, expired, and
+    /// foreign handles are indistinguishable.
+    #[must_use]
+    pub fn get(&self, peer: Peer, handle: &TaskHandle) -> Option<TaskStatus> {
+        self.find(peer, handle, |entry| entry.status(handle))
+    }
+
+    /// Like [`Self::get`], but returns what forwarding needs, including the
+    /// capability.
+    #[must_use]
+    pub fn resolve(&self, peer: Peer, handle: &TaskHandle) -> Option<ResolvedTask> {
+        self.find(peer, handle, |entry| ResolvedTask {
+            task_id: entry.task_id.clone(),
+            capability: entry.capability.clone(),
+        })
     }
 }
 
@@ -143,7 +203,7 @@ mod tests {
     #[test]
     fn handles_are_bound_to_the_uid() {
         let registry = TaskRegistry::default();
-        let status = registry.create(ALICE, task(), None).unwrap();
+        let status = registry.create(ALICE, task(), None, None).unwrap();
         assert!(status.task_handle.as_str().starts_with("th-"));
         assert_eq!(status.task_handle.as_str().len(), 67);
         assert_eq!(
@@ -162,7 +222,7 @@ mod tests {
     #[test]
     fn pid_bound_handles_reject_other_processes() {
         let registry = TaskRegistry::default();
-        let status = registry.create(ALICE, task(), Some(4242)).unwrap();
+        let status = registry.create(ALICE, task(), Some(4242), None).unwrap();
         assert_eq!(registry.get(ALICE, &status.task_handle), None);
         let agent = Peer {
             pid: Some(4242),
@@ -177,27 +237,49 @@ mod tests {
     fn open_tasks_are_capped_per_uid() {
         let registry = TaskRegistry::default();
         for _ in 0..MAX_TASKS_PER_UID {
-            registry.create(ALICE, task(), None).unwrap();
+            registry.create(ALICE, task(), None, None).unwrap();
         }
         assert_eq!(
-            registry.create(ALICE, task(), None),
+            registry.create(ALICE, task(), None, None),
             Err(TaskError::TooMany)
         );
         let bob = Peer { uid: 1001, ..ALICE };
-        assert!(registry.create(bob, task(), None).is_ok());
+        assert!(registry.create(bob, task(), None, None).is_ok());
+    }
+
+    #[test]
+    fn capabilities_stay_inside_the_registry() {
+        let registry = TaskRegistry::default();
+        let issued = TaskIssued {
+            task_id: task(),
+            capability: "eyJ.secret.token".to_owned(),
+            expires_at: OffsetDateTime::now_utc() + Duration::minutes(5),
+            grants: Vec::new(),
+            limits: Limits::default(),
+        };
+        let status = registry.create(ALICE, task(), None, Some(issued)).unwrap();
+        assert!(
+            status.expires_at < OffsetDateTime::now_utc() + TASK_TTL,
+            "capability expiry wins"
+        );
+        assert!(!serde_json::to_string(&status).unwrap().contains("eyJ"));
+        assert!(!format!("{registry:?}").contains("eyJ"));
+        let resolved = registry.resolve(ALICE, &status.task_handle).unwrap();
+        assert_eq!(resolved.capability(), Some("eyJ.secret.token"));
+        assert!(!format!("{resolved:?}").contains("eyJ"));
     }
 
     #[test]
     fn expired_handles_are_unknown() {
         let registry = TaskRegistry::default();
-        let status = registry.create(ALICE, task(), None).unwrap();
+        let status = registry.create(ALICE, task(), None, None).unwrap();
         registry
             .entries
             .lock()
             .unwrap()
             .get_mut(&status.task_handle)
             .unwrap()
-            .expires = Instant::now();
+            .expires = OffsetDateTime::now_utc();
         assert_eq!(registry.get(ALICE, &status.task_handle), None);
     }
 }

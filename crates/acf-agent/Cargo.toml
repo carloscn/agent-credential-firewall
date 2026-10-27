@@ -21,6 +21,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
+acf-identity = { workspace = true, features = ["tls"] }
 acf-protocol.workspace = true
 
 [dev-dependencies]

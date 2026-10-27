@@ -2,11 +2,16 @@
 //!
 //! Agents talk to the daemon over a Unix socket. They name a task handle,
 //! never a task capability, request identifier, or timestamp: the daemon
-//! fills those in before forwarding to the gateway.
+//! fills those in before forwarding to the gateway. A task's scope is a
+//! proposal that the Capability Authority narrows (ADR 0003); the agent
+//! sees the result but never the capability itself.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use time::OffsetDateTime;
 
+use crate::authority::BasisRequest;
+use crate::capability::{Grant, Limits};
 use crate::ids::{ActionName, ApprovalId, IdempotencyKey, ResourceId, TaskHandle, TaskId};
 
 /// `POST /v1/tasks`: opens a task and returns its handle.
@@ -19,6 +24,16 @@ pub struct CreateTaskRequest {
     /// the agent it is about to run. Hygiene, not process authentication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    /// Authorization basis to ask the authority for. Required when the
+    /// daemon has an authority; refused when it has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis: Option<BasisRequest>,
+    /// Proposed grants. Empty proposes the basis's whole scope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<Grant>,
+    /// Proposed lifetime in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_secs: Option<u32>,
 }
 
 /// Lifecycle of a task as the daemon sees it.
@@ -39,6 +54,15 @@ pub struct TaskStatus {
     pub task_id: TaskId,
     /// Current state.
     pub state: TaskState,
+    /// When the handle stops working.
+    #[serde(with = "time::serde::rfc3339")]
+    pub expires_at: OffsetDateTime,
+    /// What the capability grants; empty for an unscoped development task.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<Grant>,
+    /// Capability usage limits, when scoped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<Limits>,
 }
 
 /// `POST /v1/actions/execute` on the daemon. Like
@@ -75,6 +99,10 @@ pub enum LocalErrorCode {
     TooManyTasks,
     /// The gateway could not be reached or answered unexpectedly.
     GatewayUnavailable,
+    /// The Capability Authority refused the task.
+    TaskDenied,
+    /// The Capability Authority could not be reached.
+    AuthorityUnavailable,
 }
 
 /// Error body returned by the daemon.

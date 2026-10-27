@@ -14,10 +14,8 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
-acf-protocol.workspace = true
-
-[dev-dependencies]
 tokio.workspace = true
+acf-protocol.workspace = true
 
 [lints]
 workspace = true

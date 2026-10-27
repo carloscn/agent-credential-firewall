@@ -20,7 +20,13 @@ Milestone 1 is in progress:
 - WP-10 (done): replay protection, revocation, quotas, and rate limits, backed by SQLite.
 - WP-08 (done): the local daemon on a peer-credential Unix socket, plus TLS 1.3 mutual authentication with identity taken from an enrolled client certificate ([ADR 0002](docs/adr/0002-mtls-certificates-and-device-identity.md)). The demo is in [`examples/m1`](examples/m1/README.md).
 
-The gateway still runs only with the `development` feature and deployment profile until production validation (WP-11) lands.
+- WP-09 (done): the Capability Authority in `acf-control-plane`. It narrows a daemon's task proposal to the intersection of the caller's entitlements, a signed job definition or scheduler policy, and the registered actions. It then signs a certificate-bound capability (JWS, Ed25519; [ADR 0003](docs/adr/0003-capability-wire-encoding.md)). The gateway verifies it with public keys only, and the agent only ever holds a task handle.
+
+- WP-11 (done): configuration admission and the `production` profile ([ADR 0004](docs/adr/0004-config-admission-and-production-profile.md)). The bundle, each connector profile, and the policy are admitted separately, by a role-bound signature or a pinned digest, so a profile author cannot redirect where a secret is used. Every audit event records the admitted configuration's digest. Under `production`, the gateway refuses development builds, unadmitted configuration, plaintext listeners, missing capabilities or audit sink, the in-memory provider, and test or internal destinations, listing every problem at once.
+
+- WP-12 (done): audit integrity ([ADR 0005](docs/adr/0005-audit-hash-chain-and-checkpoints.md)). Every audit event is hash-chained to the previous one. The gateway signs the chain head and publishes it over mTLS to the control plane's append-only checkpoint collector. `acf-control-plane verify-audit` detects broken links, and truncation or replacement of anything a checkpoint covers. If no checkpoint is accepted within the maximum lag, allowed requests fail closed. Production requires checkpointing. A local hash chain alone is never treated as sufficient.
+
+Release builds (no `development` feature) run with mTLS only. A production gateway passes validation, then stops when it builds its secret providers. The encrypted local provider runtime (WP-07) is still pending in PR #12.
 
 ## Development
 
@@ -60,5 +66,6 @@ Every crate in this workspace handles secrets, identity, authorization, or audit
 | `acf-agent` | Endpoint/VPS daemon and CLI | WP-05, WP-08 |
 | `acf-control-plane` | Capability Authority and Approval Service | WP-09, WP-13 |
 | `acf-state` | Replay, revocation, quotas, receipts, journal | WP-10, WP-14 |
+| `acf-e2e` | Test-only: daemon, authority, and gateway end to end | WP-09 |
 
 `deny.toml` enforces part of the dependency direction. Only `acf-gateway` may depend on `acf-provider-local`, and OpenSSL-based TLS crates are banned.
