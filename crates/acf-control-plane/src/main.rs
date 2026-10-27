@@ -24,7 +24,7 @@ use std::fmt::Write as _;
 
 use acf_audit::{AuditKeys, AuditKeysDocument, check_checkpoints, verify_log};
 use acf_config::{
-    ConfigRole, ConfigSignature, check_document, load_yaml, parse_yaml, sha256, signing_message,
+    ConfigRole, ConfigSignature, check_document, parse_yaml, sha256, signing_message,
 };
 use acf_control_plane::{
     Authority, AuthorityConfig, AuthorityPolicy, CapabilitySigner, CheckpointStore,
@@ -120,6 +120,10 @@ struct ServeArgs {
     /// Configuration bundle (acf.config/v1); grants must name its actions.
     #[arg(long)]
     bundle: PathBuf,
+    /// Directory of the gateway's connector profiles (`*.yaml`), when they
+    /// are not inline in the bundle.
+    #[arg(long)]
+    profiles: Option<PathBuf>,
     /// Directory of signed job definitions (`*.yaml` with `*.yaml.sig`).
     #[arg(long)]
     jobs: Option<PathBuf>,
@@ -191,7 +195,7 @@ fn new_id<T>(
 }
 
 async fn serve(args: ServeArgs) -> Result<(), String> {
-    let bundle = load_yaml(&read(&args.bundle)?).map_err(|e| e.to_string())?;
+    let bundle = load_gateway_config(&args.bundle, args.profiles.as_deref())?;
     let config: AuthorityConfig =
         parse_yaml(&read(&args.authority_config)?).map_err(|e| e.to_string())?;
     let jobs = match &args.jobs {
@@ -238,6 +242,28 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
     serve_tls(listener, tls, app)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// The gateway's bundle and its separately stored profiles.
+fn load_gateway_config(
+    bundle: &Path,
+    profiles: Option<&Path>,
+) -> Result<acf_config::ValidatedConfig, String> {
+    let mut texts = Vec::new();
+    if let Some(dir) = profiles {
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+            .map_err(|e| format!("cannot read {}: {e}", dir.display()))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "yaml"))
+            .collect();
+        paths.sort();
+        for path in paths {
+            texts.push(read(&path)?);
+        }
+    }
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    acf_config::load_bundle(&read(bundle)?, &refs).map_err(|e| e.to_string())
 }
 
 fn audit_keys(path: &Path) -> Result<AuditKeys, String> {

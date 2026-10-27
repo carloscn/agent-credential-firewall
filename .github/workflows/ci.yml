@@ -45,6 +45,9 @@ jobs:
       # The release flavor (no `development` feature) must accept an admitted
       # production configuration that the development flavor refuses.
       - run: cargo test -p acf-gateway --test production
+      # Starts a generated deployment with release binaries; runs after the
+      # workspace tests so acf-control-plane and acf-agent are built.
+      - run: cargo test -p acf-gateway --test setup
 
   deny:
     runs-on: ubuntu-latest
