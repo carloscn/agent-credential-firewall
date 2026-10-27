@@ -150,6 +150,7 @@ pub trait IdentityContextProvider: Send + Sync {
 }
 
 mod capability;
+mod keyfile;
 mod mtls;
 #[cfg(feature = "tls")]
 mod tls;
@@ -157,6 +158,7 @@ pub use capability::{
     AUTHORITY_KEYS_SCHEMA, AuthorityKey, AuthorityKeys, AuthorityKeysError, CapabilityError,
     CapabilityVerifier, MAX_CAPABILITY_LIFETIME_SECS,
 };
+pub use keyfile::{KeyFileError, generate_pem, parse_key_pair, public_key, read_key_pair};
 pub use mtls::{
     DEVICE_REGISTRY_SCHEMA, DeviceEntry, DeviceRegistry, MtlsIdentityProvider, RegistryError,
     thumbprint,
@@ -164,7 +166,7 @@ pub use mtls::{
 #[cfg(feature = "tls")]
 pub use mtls::{REGISTRY_POLL, watch_registry};
 #[cfg(feature = "tls")]
-pub use tls::{HANDSHAKE_TIMEOUT, TlsError, serve_tls, server_config};
+pub use tls::{HANDSHAKE_TIMEOUT, TlsError, client_config, serve_tls, server_config};
 
 #[cfg(feature = "development")]
 mod development;

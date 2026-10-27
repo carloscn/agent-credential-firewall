@@ -177,6 +177,15 @@ impl Setup {
             ("--devices", dir("missing-devices.yaml")),
             ("--authority-keys", dir("missing-keys.yaml")),
             ("--audit-log", dir("audit.jsonl")),
+            ("--audit-key", dir("missing-audit.key")),
+            ("--audit-kid", "gw-audit-1".to_owned()),
+            (
+                "--checkpoint-url",
+                "https://localhost:9/v1/audit/checkpoints".to_owned(),
+            ),
+            ("--checkpoint-client-cert", dir("missing-client.pem")),
+            ("--checkpoint-client-key", dir("missing-client.key")),
+            ("--checkpoint-ca", dir("missing-ca.pem")),
             ("--state-db", dir("state.sqlite")),
         ];
         let mut command = Command::new(env!("CARGO_BIN_EXE_acf-gateway"));
@@ -243,6 +252,12 @@ fn production_refuses_every_missing_control_at_once() {
         "--devices",
         "--authority-keys",
         "--audit-log",
+        "--audit-key",
+        "--audit-kid",
+        "--checkpoint-url",
+        "--checkpoint-client-cert",
+        "--checkpoint-client-key",
+        "--checkpoint-ca",
     ]);
     assert!(!ok);
     let found = refusals(&stderr);
@@ -251,6 +266,7 @@ fn production_refuses_every_missing_control_at_once() {
         "plaintext listener",
         "--authority-keys",
         "--audit-log",
+        "anchored externally",
     ] {
         assert!(
             found.iter().any(|r| r.contains(needle)),

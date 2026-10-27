@@ -4,6 +4,8 @@
 //! - `keygen`: a new Ed25519 PKCS#8 key, written with mode 0600.
 //! - `trust-entry`: the `acf.authority-keys/v1` document gateways need.
 //! - `sign-job`: a detached signature for a job definition.
+//! - `verify-audit`: checks a gateway audit log's hash chain against the
+//!   collector's signed checkpoints (ADR 0005).
 //! - `admit`: checks a configuration document for its role and signs it
 //!   (ADR 0004). Drafts, including agent-authored profiles, do nothing until
 //!   admitted.
@@ -18,12 +20,16 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use std::fmt::Write as _;
+
+use acf_audit::{AuditKeys, AuditKeysDocument, check_checkpoints, verify_log};
 use acf_config::{
     ConfigRole, ConfigSignature, check_document, load_yaml, parse_yaml, sha256, signing_message,
 };
 use acf_control_plane::{
-    Authority, AuthorityConfig, AuthorityPolicy, CapabilitySigner, generate_pem, public_key,
-    read_jobs, read_key_pair, router, sign_detached,
+    Authority, AuthorityConfig, AuthorityPolicy, CapabilitySigner, CheckpointStore,
+    checkpoint_router, generate_pem, public_key, read_jobs, read_key_pair, read_stored, router,
+    sign_detached,
 };
 use acf_identity::{
     AUTHORITY_KEYS_SCHEMA, DeviceRegistry, MtlsIdentityProvider, serve_tls, server_config,
@@ -79,6 +85,20 @@ enum Command {
         /// The document.
         file: PathBuf,
     },
+    /// Verify a gateway audit log: every chain link, and every stored
+    /// checkpoint of that log. Exits non-zero on any break, truncation, or
+    /// replacement.
+    VerifyAudit {
+        /// The gateway's audit log (JSON lines).
+        #[arg(long)]
+        log: PathBuf,
+        /// The collector's checkpoint store directory.
+        #[arg(long)]
+        checkpoints: PathBuf,
+        /// Gateway audit keys (acf.audit-keys/v1).
+        #[arg(long)]
+        audit_keys: PathBuf,
+    },
     /// Write `<job>.sig`, a detached signature over the job definition file.
     SignJob {
         /// Administrator signing key.
@@ -124,6 +144,14 @@ struct ServeArgs {
     /// Device registry (acf.devices/v1), re-read when it changes.
     #[arg(long)]
     devices: PathBuf,
+    /// Gateway audit keys (acf.audit-keys/v1). With `--checkpoint-store`,
+    /// serves `POST /v1/audit/checkpoints`.
+    #[arg(long, requires = "checkpoint_store")]
+    audit_keys: Option<PathBuf>,
+    /// Directory for accepted checkpoints, one append-only file per log. Put
+    /// it on storage the gateways' hosts cannot reach.
+    #[arg(long, requires = "audit_keys")]
+    checkpoint_store: Option<PathBuf>,
 }
 
 fn parse_role(text: &str) -> Result<ConfigRole, String> {
@@ -201,9 +229,70 @@ async fn serve(args: ServeArgs) -> Result<(), String> {
         "Capability Authority `{issuer}` listening on https://{} ({job_count} signed jobs)",
         args.listen
     ));
-    serve_tls(listener, tls, router(authority, identity))
+    let mut app = router(authority, identity.clone());
+    if let (Some(keys), Some(dir)) = (&args.audit_keys, &args.checkpoint_store) {
+        let store = CheckpointStore::open(dir, audit_keys(keys)?)?;
+        report(&format!("audit checkpoints stored in {}", dir.display()));
+        app = app.merge(checkpoint_router(Arc::new(store), identity));
+    }
+    serve_tls(listener, tls, app)
         .await
         .map_err(|e| e.to_string())
+}
+
+fn audit_keys(path: &Path) -> Result<AuditKeys, String> {
+    let document: AuditKeysDocument = parse_yaml(&read(path)?).map_err(|e| e.to_string())?;
+    AuditKeys::new(document).map_err(|e| e.to_string())
+}
+
+/// Checks a log against the stored checkpoints. `Ok` holds the report;
+/// `Err` holds the report of what failed.
+fn verify_audit(log: &Path, store: &Path, keys: &Path) -> Result<String, String> {
+    let keys = audit_keys(keys)?;
+    let verified = verify_log(&read_bytes(log)?)
+        .map_err(|e| format!("{}: chain broken: {e}", log.display()))?;
+    let mut statements = Vec::new();
+    for envelope in read_stored(store, &verified.log)? {
+        let (statement, _) = keys
+            .verify(&envelope)
+            .map_err(|e| format!("stored checkpoint for {} rejected: {e}", verified.log))?;
+        statements.push(statement);
+    }
+    let findings = check_checkpoints(&verified, &statements);
+    let head = verified.head();
+    let mut report = format!(
+        "log {}: {} events, every link verified, head seq {} {}\n",
+        verified.log,
+        verified.len(),
+        head.seq,
+        head.hash
+    );
+    match statements.iter().max_by_key(|s| s.seq) {
+        Some(newest) => {
+            let _ = writeln!(
+                report,
+                "{} checkpoints; newest covers seq {} (issued {}); {} later events rely on the local chain only",
+                statements.len(),
+                newest.seq,
+                newest
+                    .issued_at
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default(),
+                head.seq.saturating_sub(newest.seq)
+            );
+        }
+        None => report.push_str(
+            "no checkpoints: nothing protects this log against truncation or replacement\n",
+        ),
+    }
+    if findings.is_empty() {
+        Ok(report)
+    } else {
+        for finding in findings {
+            let _ = writeln!(report, "FAIL: {finding}");
+        }
+        Err(report)
+    }
 }
 
 fn write_new(path: &Path, contents: &str, mode: u32) -> Result<(), String> {
@@ -246,6 +335,11 @@ fn run_offline(command: Command) -> Result<(), String> {
             ));
             Ok(())
         }
+        Command::VerifyAudit {
+            log,
+            checkpoints,
+            audit_keys,
+        } => verify_audit(&log, &checkpoints, &audit_keys).map(|report| print(&report)),
         Command::Admit {
             role,
             key,

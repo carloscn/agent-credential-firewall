@@ -5,17 +5,15 @@ use std::fs::File;
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
+use acf_identity::TlsError;
 use acf_protocol::{
     ActionRequest, ActionResponse, AuthorityError, AuthorityErrorCode, CAPABILITY_HEADER,
     TaskIssued, TaskProposal,
 };
 use reqwest::Url;
-use rustls::pki_types::pem::PemObject;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::{ClientConfig, RootCertStore};
+use rustls::ClientConfig;
 
 /// Largest gateway response the daemon reads.
 pub const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -93,34 +91,13 @@ pub fn client_config(
     key_pem: &[u8],
     gateway_ca_pem: &[u8],
 ) -> Result<ClientConfig, GatewayError> {
-    let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(certificate_chain_pem)
-        .collect::<Result<_, _>>()
-        .map_err(|_| GatewayError::Pem("client certificate"))?;
-    if chain.is_empty() {
-        return Err(GatewayError::Pem("client certificate"));
-    }
-    let key =
-        PrivateKeyDer::from_pem_slice(key_pem).map_err(|_| GatewayError::Pem("client key"))?;
-    let mut roots = RootCertStore::empty();
-    for certificate in CertificateDer::pem_slice_iter(gateway_ca_pem) {
-        roots
-            .add(certificate.map_err(|_| GatewayError::Pem("gateway CA"))?)
-            .map_err(|_| GatewayError::Pem("gateway CA"))?;
-    }
-    if roots.is_empty() {
-        return Err(GatewayError::Pem("gateway CA"));
-    }
-    let mut config = ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .map_err(|e| GatewayError::Config(e.to_string()))?
-    .with_root_certificates(roots)
-    .with_client_auth_cert(chain, key)
-    .map_err(|e| GatewayError::Config(e.to_string()))?;
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    config.enable_early_data = false;
-    Ok(config)
+    acf_identity::client_config(certificate_chain_pem, key_pem, gateway_ca_pem).map_err(|e| match e
+    {
+        TlsError::Certificate => GatewayError::Pem("client certificate"),
+        TlsError::PrivateKey => GatewayError::Pem("client key"),
+        TlsError::ClientCa => GatewayError::Pem("gateway CA"),
+        TlsError::Config(message) => GatewayError::Config(message),
+    })
 }
 
 /// Sends semantic requests to the gateway over mTLS.
@@ -300,12 +277,12 @@ mod tests {
 
     #[test]
     fn only_https_gateways_are_accepted() {
-        let tls = ClientConfig::builder_with_provider(Arc::new(
+        let tls = ClientConfig::builder_with_provider(std::sync::Arc::new(
             rustls::crypto::aws_lc_rs::default_provider(),
         ))
         .with_protocol_versions(&[&rustls::version::TLS13])
         .unwrap()
-        .with_root_certificates(RootCertStore::empty())
+        .with_root_certificates(rustls::RootCertStore::empty())
         .with_no_client_auth();
         assert!(matches!(
             GatewayClient::new("http://127.0.0.1:8443", tls),

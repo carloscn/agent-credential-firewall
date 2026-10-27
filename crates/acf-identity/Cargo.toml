@@ -16,6 +16,7 @@ tls = ["dep:axum", "dep:hyper", "dep:hyper-util", "dep:rustls", "dep:tokio", "de
 
 [dependencies]
 acf-protocol.workspace = true
+base64.workspace = true
 async-trait.workspace = true
 axum = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true }

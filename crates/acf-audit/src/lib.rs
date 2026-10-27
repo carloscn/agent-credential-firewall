@@ -9,7 +9,25 @@
 //! parameter values enter only through [`AuditParam`], which the gateway fills
 //! according to each parameter's audit classification.
 //!
-//! Tamper evidence (hash chain and external checkpoints) arrives with WP-12.
+//! Tamper evidence (ADR 0005): [`ChainedJsonSink`] links every event to the
+//! previous one by hash, [`CheckpointSigner`] signs the chain head, and a
+//! collector outside the gateway host keeps the signed checkpoints.
+//! [`verify_log`] and [`check_checkpoints`] detect broken links, truncation,
+//! and replacement of anything a checkpoint covers. A local chain alone is
+//! never sufficient against a compromised host.
+
+mod chain;
+mod checkpoint;
+
+pub use chain::{
+    AnchorState, ChainError, ChainHead, ChainLink, ChainedJsonSink, VerifiedLog, genesis,
+    line_hash, verify_log,
+};
+pub use checkpoint::{
+    AUDIT_KEYS_SCHEMA, AuditKeyEntry, AuditKeys, AuditKeysDocument, CHECKPOINT_SCHEMA,
+    CheckpointEnvelope, CheckpointError, CheckpointFinding, CheckpointPublisher, CheckpointSigner,
+    CheckpointStatement, PublishError, check_checkpoints, run_checkpoints,
+};
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -147,6 +165,9 @@ pub struct AuditEvent {
     /// Parameters, filtered by audit classification.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, AuditParam>,
+    /// Hash-chain link, set by a chained sink (ADR 0005).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain: Option<ChainLink>,
     /// Downstream result, on outcome events.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub downstream: Option<Downstream>,
@@ -184,6 +205,7 @@ impl AuditEvent {
             connector: None,
             secret_ref: None,
             params: BTreeMap::new(),
+            chain: None,
             downstream: None,
         }
     }
@@ -245,6 +267,13 @@ pub enum AuditError {
     /// The sink could not record the event.
     #[error("audit sink unavailable")]
     Unavailable,
+    /// No checkpoint has been accepted within the maximum lag, so the sink
+    /// refuses new events (ADR 0005).
+    #[error("audit log is not anchored by a recent checkpoint")]
+    Unanchored,
+    /// An existing audit file cannot be continued.
+    #[error("cannot continue audit log: {0}")]
+    Continue(String),
     /// No secure random source.
     #[error("no secure random source available")]
     Random,

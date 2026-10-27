@@ -18,6 +18,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
+acf-audit.workspace = true
 acf-config.workspace = true
 acf-identity = { workspace = true, features = ["tls"] }
 acf-protocol.workspace = true

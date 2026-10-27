@@ -30,6 +30,8 @@ pub struct StartupFacts {
     pub capabilities_required: bool,
     /// An explicit audit sink rather than standard error.
     pub audit_sink: bool,
+    /// Audit checkpoints go to an external collector (`--checkpoint-url`).
+    pub audit_anchored: bool,
 }
 
 /// Every reason the gateway may not start under `production`. Empty means
@@ -68,6 +70,12 @@ pub fn production_refusals(facts: &StartupFacts, config: &ValidatedConfig) -> Ve
     }
     if !facts.audit_sink {
         refusals.push("an explicit audit sink is required: pass --audit-log".to_owned());
+    }
+    if !facts.audit_anchored {
+        refusals.push(
+            "the audit chain must be anchored externally: pass --audit-key, --audit-kid, and --checkpoint-url with its client certificate"
+                .to_owned(),
+        );
     }
     refusals.extend(production_issues(config).into_iter().map(|i| i.to_string()));
     refusals
