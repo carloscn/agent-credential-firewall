@@ -61,8 +61,8 @@ fn format_issues(issues: &[ConfigIssue]) -> String {
         .join("\n")
 }
 
-/// Runtime deployment profile (design §13.4). Production-specific startup
-/// validation arrives with WP-11.
+/// Runtime deployment profile (design §13.4). Production rules are in
+/// [`crate::production_issues`] and the gateway's startup checks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeploymentProfile {
@@ -229,6 +229,9 @@ struct RawBundle {
     schema: String,
     deployment: Deployment,
     secret_providers: BTreeMap<Namespace, SecretProviderConfig>,
+    /// Inline profiles; development only. Production loads each profile
+    /// from its own admitted file (ADR 0004).
+    #[serde(default)]
     profiles: Vec<ConnectorProfile>,
     #[serde(default)]
     resources: BTreeMap<ResourceId, ResourceRegistration>,
@@ -260,9 +263,27 @@ pub struct ValidatedConfig {
     profiles: BTreeMap<ConnectorName, ConnectorProfile>,
     resources: BTreeMap<ResourceId, ResourceRegistration>,
     secrets: BTreeMap<SecretRef, SecretRegistration>,
+    inline_profiles: usize,
 }
 
 impl ValidatedConfig {
+    /// How many profiles came inline in the bundle rather than from their
+    /// own files.
+    #[must_use]
+    pub fn inline_profile_count(&self) -> usize {
+        self.inline_profiles
+    }
+
+    /// Every connector profile.
+    pub fn profiles(&self) -> impl Iterator<Item = (&ConnectorName, &ConnectorProfile)> {
+        self.profiles.iter()
+    }
+
+    /// Every secret registration.
+    pub fn secrets(&self) -> impl Iterator<Item = (&SecretRef, &SecretRegistration)> {
+        self.secrets.iter()
+    }
+
     /// Deployment settings.
     #[must_use]
     pub fn deployment(&self) -> &Deployment {
@@ -359,7 +380,74 @@ pub fn parse_yaml<T: serde::de::DeserializeOwned>(input: &str) -> Result<T, Conf
 /// Returns [`ConfigError`] if the document is too large, malformed, or
 /// fails any validation check. All validation issues are reported together.
 pub fn load_yaml(input: &str) -> Result<ValidatedConfig, ConfigError> {
-    validate(parse_yaml::<RawBundle>(input)?)
+    load_bundle(input, &[])
+}
+
+/// Parses a bundle plus separately stored `acf.profile/v1` documents, and
+/// validates them together.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] as [`load_yaml`] does. A profile document that
+/// does not parse is reported with its index.
+pub fn load_bundle(bundle: &str, profiles: &[&str]) -> Result<ValidatedConfig, ConfigError> {
+    let mut raw = parse_yaml::<RawBundle>(bundle)?;
+    let inline = raw.profiles.len();
+    for (index, text) in profiles.iter().enumerate() {
+        let profile = parse_yaml::<ConnectorProfile>(text)
+            .map_err(|e| ConfigError::Parse(format!("profile document {index}: {e}")))?;
+        raw.profiles.push(profile);
+    }
+    let mut config = validate(raw)?;
+    config.inline_profiles = inline;
+    Ok(config)
+}
+
+/// Checks that `text` is a well-formed document for `role`, before an
+/// administrator admits it. Profiles get their full single-document
+/// validation; the bundle and policy are checked for structure here and
+/// validated together at gateway startup.
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] describing what is wrong.
+pub fn check_document(role: crate::ConfigRole, text: &str) -> Result<(), ConfigError> {
+    use crate::ConfigRole;
+    match role {
+        ConfigRole::ProfileAuthor => {
+            let profile = parse_yaml::<ConnectorProfile>(text)?;
+            let issues: Vec<ConfigIssue> = profile
+                .problems()
+                .into_iter()
+                .map(|(location, problem)| ConfigIssue { location, problem })
+                .collect();
+            if issues.is_empty() {
+                Ok(())
+            } else {
+                Err(ConfigError::Invalid(issues))
+            }
+        }
+        ConfigRole::SecretAdmin => {
+            let raw = parse_yaml::<RawBundle>(text)?;
+            if raw.schema == CONFIG_SCHEMA {
+                Ok(())
+            } else {
+                Err(ConfigError::Parse(format!(
+                    "schema must be `{CONFIG_SCHEMA}`"
+                )))
+            }
+        }
+        ConfigRole::PolicyAdmin => {
+            let value = parse_yaml::<serde_json::Value>(text)?;
+            if value.get("schema").and_then(serde_json::Value::as_str) == Some("acf.policy/v1") {
+                Ok(())
+            } else {
+                Err(ConfigError::Parse(
+                    "schema must be `acf.policy/v1`".to_owned(),
+                ))
+            }
+        }
+    }
 }
 
 struct Issues(Vec<ConfigIssue>);
@@ -438,6 +526,7 @@ fn validate(raw: RawBundle) -> Result<ValidatedConfig, ConfigError> {
             profiles,
             resources: raw.resources,
             secrets: raw.secrets,
+            inline_profiles: 0,
         })
     } else {
         Err(ConfigError::Invalid(issues.0))

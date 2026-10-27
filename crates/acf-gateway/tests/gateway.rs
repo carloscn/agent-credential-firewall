@@ -216,6 +216,7 @@ fn audit_settings(sink: Arc<dyn AuditSink>) -> AuditSettings {
             id: "gw-test".to_owned(),
             build: "development".to_owned(),
             deployment_profile: "development".to_owned(),
+            config_digest: None,
         },
     }
 }

@@ -22,7 +22,9 @@ Milestone 1 is in progress:
 
 - WP-09 (done): the Capability Authority in `acf-control-plane`. It narrows a daemon's task proposal to the intersection of the caller's entitlements, a signed job definition or scheduler policy, and the registered actions. It then signs a certificate-bound capability (JWS, Ed25519; [ADR 0003](docs/adr/0003-capability-wire-encoding.md)). The gateway verifies it with public keys only, and the agent only ever holds a task handle.
 
-The gateway still runs only with the `development` feature and deployment profile until production validation (WP-11) lands.
+- WP-11 (done): configuration admission and the `production` profile ([ADR 0004](docs/adr/0004-config-admission-and-production-profile.md)). The bundle, each connector profile, and the policy are admitted separately, by a role-bound signature or a pinned digest, so a profile author cannot redirect where a secret is used. Every audit event records the admitted configuration's digest. Under `production`, the gateway refuses development builds, unadmitted configuration, plaintext listeners, missing capabilities or audit sink, the in-memory provider, and test or internal destinations, listing every problem at once.
+
+Release builds (no `development` feature) run with mTLS only. A production gateway passes validation, then stops when it builds its secret providers. The encrypted local provider runtime (WP-07) is still pending in PR #12.
 
 ## Development
 

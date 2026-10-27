@@ -231,6 +231,7 @@ async fn gateway(
                 id: "gw".to_owned(),
                 build: "development".to_owned(),
                 deployment_profile: "development".to_owned(),
+                config_digest: None,
             },
         },
         StateSettings::new(store, OffsetDateTime::now_utc().unix_timestamp() - 3600),

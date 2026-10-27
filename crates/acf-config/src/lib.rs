@@ -6,18 +6,29 @@
 //! expansion beyond a small budget, and it validates every cross-reference
 //! before returning. A bundle with any issue is rejected as a whole.
 //!
-//! Signed and pinned bundles and `production` startup validation arrive with
-//! WP-11.
+//! [`load_bundle`] also takes connector profiles stored as separate
+//! documents. [`ConfigTrust::admit`] admits each document for its role by a
+//! signature or a pinned digest, and [`production_issues`] lists what the
+//! `production` profile refuses (ADR 0004).
 
+mod admission;
 mod bundle;
 mod params;
+mod production;
 mod profile;
 mod template;
+
+pub use admission::{
+    AdmissionError, CONFIG_TRUST_SCHEMA, ConfigRole, ConfigSignature, ConfigTrust, SourceFile,
+    config_digest, sha256, signing_message,
+};
+pub use production::{destination_problem, production_issues};
 
 pub use bundle::{
     CONFIG_SCHEMA, ConfigError, ConfigIssue, Deployment, DeploymentProfile, KeySourceKind,
     MAX_CONFIG_BYTES, ResolvedAction, ResourceRegistration, RollbackAnchorKind, RollbackResistance,
-    SecretProviderConfig, SecretRegistration, ValidatedConfig, load_yaml, parse_yaml,
+    SecretProviderConfig, SecretRegistration, ValidatedConfig, check_document, load_bundle,
+    load_yaml, parse_yaml,
 };
 pub use params::{
     DEFAULT_MAX_LENGTH, MAX_MAX_LENGTH, ParamError, ParamErrorKind, ParamLocation, ParamSpec,

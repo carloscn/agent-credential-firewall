@@ -61,6 +61,10 @@ pub struct GatewayInfo {
     pub build: String,
     /// Deployment profile.
     pub deployment_profile: String,
+    /// Digest of the admitted configuration (ADR 0004); absent when the
+    /// configuration was not admitted (development).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_digest: Option<String>,
 }
 
 /// A parameter as it appears in an event.
@@ -322,6 +326,7 @@ mod tests {
                 id: "gw".to_owned(),
                 build: "development".to_owned(),
                 deployment_profile: "development".to_owned(),
+                config_digest: None,
             },
             RequestId::new("req-1").unwrap(),
             TaskId::new("task-1").unwrap(),

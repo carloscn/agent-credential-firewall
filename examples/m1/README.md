@@ -105,6 +105,40 @@ target/debug/acf-agent action execute --socket "$RUN/acf.sock" --task-handle "$H
 - Without `--job`, the daemon refuses to open a task, because it cannot be scoped. A daemon started without `--authority` opens unscoped tasks, and this gateway rejects their requests with `capability_invalid`.
 - Edit the job file without re-signing it, and the authority refuses to start.
 
+## Configuration admission (WP-11)
+
+The gateway can require that every configuration document be admitted ([ADR 0004](../../docs/adr/0004-config-admission-and-production-profile.md)). There are three roles:
+
+- `secret-admin` admits the bundle: providers, resources, and secret use bindings.
+- `profile-author` admits each connector profile, one file each, in a `--profiles` directory.
+- `policy-admin` admits the policy.
+
+```bash
+CP=target/debug/acf-control-plane
+$CP keygen --out profiles.key > profiles.pub
+$CP keygen --out secrets.key > secrets.pub
+cat > trust.yaml <<EOF
+schema: acf.config-trust/v1
+signers:
+  - { kid: profiles-1, public_key: $(cat profiles.pub), roles: [profile-author] }
+  - { kid: secrets-1, public_key: $(cat secrets.pub), roles: [secret-admin, policy-admin] }
+EOF
+
+# Each admit checks the document for its role, prints its digest, and writes <file>.sig.
+$CP admit --role profile-author --key profiles.key --kid profiles-1 profiles/example-api.yaml
+$CP admit --role secret-admin --key secrets.key --kid secrets-1 bundle.yaml
+$CP admit --role policy-admin --key secrets.key --kid secrets-1 policy.yaml
+
+target/debug/acf-gateway --config bundle.yaml --profiles profiles --policy policy.yaml \
+  --config-trust trust.yaml …
+```
+
+- The startup line and every audit event carry `config_digest`, a digest of every admitted document.
+- Edit `profiles/example-api.yaml` after admitting it and the gateway refuses to start: the signature no longer matches. Drafts, such as a profile an agent wrote, stay out of `profiles/` until someone admits them.
+- A key that holds only `profile-author` cannot admit the bundle, and a signature made for one role does not verify for another.
+- A pin, `pins: [{ role: policy-admin, sha256: "sha256:…" }]` in the trust anchor, admits the exact bytes without a signature.
+- Change the bundle to `profile: production` and a development build refuses to start. It lists every rule the setup breaks: the build flavor, plaintext, no capabilities, no audit sink, the in-memory provider, and `http://` loopback destinations.
+
 ## Production topology
 
 | Account | Can read | Can connect to |

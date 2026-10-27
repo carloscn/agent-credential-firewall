@@ -4,6 +4,9 @@
 //! - `keygen`: a new Ed25519 PKCS#8 key, written with mode 0600.
 //! - `trust-entry`: the `acf.authority-keys/v1` document gateways need.
 //! - `sign-job`: a detached signature for a job definition.
+//! - `admit`: checks a configuration document for its role and signs it
+//!   (ADR 0004). Drafts, including agent-authored profiles, do nothing until
+//!   admitted.
 //!
 //! Private keys are read from files, never from the command line.
 
@@ -15,7 +18,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use acf_config::{load_yaml, parse_yaml};
+use acf_config::{
+    ConfigRole, ConfigSignature, check_document, load_yaml, parse_yaml, sha256, signing_message,
+};
 use acf_control_plane::{
     Authority, AuthorityConfig, AuthorityPolicy, CapabilitySigner, generate_pem, public_key,
     read_jobs, read_key_pair, router, sign_detached,
@@ -24,6 +29,7 @@ use acf_identity::{
     AUTHORITY_KEYS_SCHEMA, DeviceRegistry, MtlsIdentityProvider, serve_tls, server_config,
     watch_registry,
 };
+use acf_protocol::base64url_encode;
 use acf_protocol::{IssuerId, KeyId};
 use clap::{Parser, Subcommand};
 
@@ -57,6 +63,21 @@ enum Command {
         /// Issuer the key signs for.
         #[arg(long)]
         issuer: String,
+    },
+    /// Admit a configuration document: check it for its role, print its
+    /// digest, and write `<file>.sig`.
+    Admit {
+        /// `profile-author`, `secret-admin`, or `policy-admin`.
+        #[arg(long, value_parser = parse_role)]
+        role: ConfigRole,
+        /// Administrator signing key for that role.
+        #[arg(long)]
+        key: PathBuf,
+        /// Administrator key identifier, as listed in the trust anchor.
+        #[arg(long)]
+        kid: String,
+        /// The document.
+        file: PathBuf,
     },
     /// Write `<job>.sig`, a detached signature over the job definition file.
     SignJob {
@@ -103,6 +124,17 @@ struct ServeArgs {
     /// Device registry (acf.devices/v1), re-read when it changes.
     #[arg(long)]
     devices: PathBuf,
+}
+
+fn parse_role(text: &str) -> Result<ConfigRole, String> {
+    [
+        ConfigRole::ProfileAuthor,
+        ConfigRole::SecretAdmin,
+        ConfigRole::PolicyAdmin,
+    ]
+    .into_iter()
+    .find(|role| role.as_str() == text)
+    .ok_or_else(|| "expected profile-author, secret-admin, or policy-admin".to_owned())
 }
 
 fn read(path: &Path) -> Result<String, String> {
@@ -211,6 +243,33 @@ fn run_offline(command: Command) -> Result<(), String> {
             print(&format!(
                 "schema: {AUTHORITY_KEYS_SCHEMA}\nkeys:\n  - kid: {kid}\n    issuer: {issuer}\n    alg: EdDSA\n    public_key: {}\n",
                 public_key(&pair)
+            ));
+            Ok(())
+        }
+        Command::Admit {
+            role,
+            key,
+            kid,
+            file,
+        } => {
+            let bytes = read_bytes(&file)?;
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|_| format!("{} is not UTF-8", file.display()))?;
+            check_document(role, text).map_err(|e| format!("{}: {e}", file.display()))?;
+            let pair = read_key_pair(&key).map_err(|e| e.to_string())?;
+            let signature = ConfigSignature {
+                kid: new_id(KeyId::new, &kid)?,
+                signature: base64url_encode(pair.sign(&signing_message(role, &bytes)).as_ref()),
+            };
+            let mut target = file.clone().into_os_string();
+            target.push(".sig");
+            let text = serde_json::to_string(&signature).map_err(|e| e.to_string())?;
+            std::fs::write(PathBuf::from(&target), format!("{text}\n"))
+                .map_err(|e| format!("cannot write {}: {e}", PathBuf::from(&target).display()))?;
+            print(&format!(
+                "{role} {} {}\n",
+                sha256(&bytes).as_str(),
+                file.display()
             ));
             Ok(())
         }

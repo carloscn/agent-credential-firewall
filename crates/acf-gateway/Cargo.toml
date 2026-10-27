@@ -31,6 +31,7 @@ acf-secrets.workspace = true
 acf-state.workspace = true
 
 [dev-dependencies]
+ring.workspace = true
 rustls.workspace = true
 rcgen.workspace = true
 acf-agent.workspace = true
