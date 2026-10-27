@@ -139,6 +139,40 @@ target/debug/acf-gateway --config bundle.yaml --profiles profiles --policy polic
 - A pin, `pins: [{ role: policy-admin, sha256: "sha256:…" }]` in the trust anchor, admits the exact bytes without a signature.
 - Change the bundle to `profile: production` and a development build refuses to start. It lists every rule the setup breaks: the build flavor, plaintext, no capabilities, no audit sink, the in-memory provider, and `http://` loopback destinations.
 
+## Audit integrity (WP-12)
+
+Every audit event carries `chain: {log, seq, prev}`, so changing or removing a line breaks the chain. A host attacker can still truncate the log or rebuild the whole chain. The external anchor is a signed checkpoint of the chain head, held by the control plane ([ADR 0005](../../docs/adr/0005-audit-hash-chain-and-checkpoints.md)).
+
+```bash
+# The gateway needs its own client certificate (gw-1) and an audit signing key.
+target/debug/examples/dev-pki "$PKI" vps-17 gw-1
+$CP keygen --out "$PKI/gw-audit.key" > "$PKI/gw-audit.pub"
+cat > "$PKI/audit-keys.yaml" <<EOF
+schema: acf.audit-keys/v1
+keys:
+  - { kid: gw-audit-1, gateway: acf-gateway-dev, principal: "workload:gw-1", public_key: $(cat "$PKI/gw-audit.pub") }
+EOF
+
+# The control plane collects checkpoints. Keep the store off the gateway's host.
+$CP serve … --audit-keys "$PKI/audit-keys.yaml" --checkpoint-store /var/lib/acf-checkpoints
+
+# The gateway signs and publishes its chain head every --checkpoint-interval-secs.
+target/debug/acf-gateway … --audit-log /tmp/acf-m1-audit.jsonl \
+  --audit-key "$PKI/gw-audit.key" --audit-kid gw-audit-1 \
+  --checkpoint-url https://localhost:8444/v1/audit/checkpoints \
+  --checkpoint-client-cert "$PKI/gw-1.pem" --checkpoint-client-key "$PKI/gw-1.key" \
+  --checkpoint-ca "$PKI/ca.pem"
+
+# Later, anywhere the log and the store are both readable:
+$CP verify-audit --log /tmp/acf-m1-audit.jsonl \
+  --checkpoints /var/lib/acf-checkpoints --audit-keys "$PKI/audit-keys.yaml"
+```
+
+- `verify-audit` checks every link and every checkpoint signature. It reports how many events come after the newest checkpoint, which are protected by the local chain only.
+- Cut the newest events (`head -n 4`) and the local chain still verifies, but `verify-audit` fails: `checkpoint at seq 5 but the log has only 4 events: truncated`. A rewritten history with a recomputed chain fails the same way, as `replaced`.
+- The collector refuses a different head for a position it has already accepted (`409 checkpoint_conflict`), including one signed with the gateway's own key. It also refuses checkpoints from any certificate other than the key's principal.
+- Stop the control plane and allowed requests start failing with `audit_unavailable` after `--checkpoint-max-lag-secs` (default 300). Denials are still answered.
+
 ## Production topology
 
 | Account | Can read | Can connect to |

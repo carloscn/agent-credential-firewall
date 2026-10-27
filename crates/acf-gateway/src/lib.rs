@@ -9,12 +9,14 @@
 //! a development identity remains for the `development` feature. Approvals
 //! arrive in later work packages; see `docs/implementation-plan.md`.
 
+mod checkpoint;
 mod http;
 mod pipeline;
 mod startup;
 mod state;
 
 pub use acf_identity::{HANDSHAKE_TIMEOUT, TlsError, serve_tls, server_config};
+pub use checkpoint::HttpCheckpointPublisher;
 pub use http::{ServerLimits, router};
 pub use pipeline::{AuditSettings, Gateway, GatewayError, ProviderRegistry};
 pub use startup::{BUILD_FLAVOR, StartupFacts, production_refusals};

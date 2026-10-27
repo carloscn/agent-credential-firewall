@@ -24,6 +24,8 @@ Milestone 1 is in progress:
 
 - WP-11 (done): configuration admission and the `production` profile ([ADR 0004](docs/adr/0004-config-admission-and-production-profile.md)). The bundle, each connector profile, and the policy are admitted separately, by a role-bound signature or a pinned digest, so a profile author cannot redirect where a secret is used. Every audit event records the admitted configuration's digest. Under `production`, the gateway refuses development builds, unadmitted configuration, plaintext listeners, missing capabilities or audit sink, the in-memory provider, and test or internal destinations, listing every problem at once.
 
+- WP-12 (done): audit integrity ([ADR 0005](docs/adr/0005-audit-hash-chain-and-checkpoints.md)). Every audit event is hash-chained to the previous one. The gateway signs the chain head and publishes it over mTLS to the control plane's append-only checkpoint collector. `acf-control-plane verify-audit` detects broken links, and truncation or replacement of anything a checkpoint covers. If no checkpoint is accepted within the maximum lag, allowed requests fail closed. Production requires checkpointing. A local hash chain alone is never treated as sufficient.
+
 Release builds (no `development` feature) run with mTLS only. A production gateway passes validation, then stops when it builds its secret providers. The encrypted local provider runtime (WP-07) is still pending in PR #12.
 
 ## Development

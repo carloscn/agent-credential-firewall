@@ -17,29 +17,38 @@
 //! With `--authority-keys`, every request must carry a task capability signed
 //! by one of those keys (ADR 0003). Secret values are never accepted as
 //! arguments.
+//!
+//! Audit events are hash-chained (ADR 0005). With `--checkpoint-url`, the
+//! chain head is signed with `--audit-key` and published to an external
+//! collector; if none is accepted for `--checkpoint-max-lag-secs`, the audit
+//! sink refuses new events and allowed requests fail closed.
 
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
-use acf_audit::{AuditHasher, GatewayInfo, JsonLinesSink};
+use acf_audit::{
+    AnchorState, AuditHasher, ChainedJsonSink, CheckpointSigner, GatewayInfo, run_checkpoints,
+};
 use acf_config::{
     ConfigRole, ConfigTrust, DeploymentProfile, SecretProviderConfig, SourceFile, ValidatedConfig,
     load_bundle, parse_yaml,
 };
 use acf_connectors::{HttpConnector, HttpLimits, NetworkPolicy, SystemResolver};
 use acf_gateway::{
-    AuditSettings, BUILD_FLAVOR, Gateway, ProviderRegistry, RateLimits, ServerLimits, StartupFacts,
-    StateSettings, production_refusals, router, serve_tls, server_config,
+    AuditSettings, BUILD_FLAVOR, Gateway, HttpCheckpointPublisher, ProviderRegistry, RateLimits,
+    ServerLimits, StartupFacts, StateSettings, production_refusals, router, serve_tls,
+    server_config,
 };
 use acf_identity::{
     AuthorityKeys, CapabilityVerifier, DeviceRegistry, IdentityContextProvider,
-    MtlsIdentityProvider, watch_registry,
+    MtlsIdentityProvider, client_config, read_key_pair, watch_registry,
 };
 use acf_policy::{Authorizer, AuthorizerSettings};
-use acf_protocol::{AudienceId, IssuerId, Sha256Digest};
+use acf_protocol::{AudienceId, IssuerId, KeyId, Sha256Digest};
 use acf_state::SqliteStateStore;
 use clap::Parser;
 
@@ -96,6 +105,33 @@ struct Args {
     /// (refused under `production`).
     #[arg(long)]
     audit_log: Option<PathBuf>,
+    /// Ed25519 key (PKCS#8 PEM, mode 0600) that signs audit checkpoints.
+    #[arg(long, requires = "audit_kid")]
+    audit_key: Option<PathBuf>,
+    /// Identifier of the audit key, as the collector knows it.
+    #[arg(long, requires = "audit_key")]
+    audit_kid: Option<String>,
+    /// Checkpoint collector URL, for example
+    /// `https://control-plane:8444/v1/audit/checkpoints`. Required under
+    /// `production`.
+    #[arg(long, requires_all = ["audit_key", "checkpoint_client_cert", "checkpoint_client_key", "checkpoint_ca"])]
+    checkpoint_url: Option<String>,
+    /// Client certificate chain this gateway presents to the collector (PEM).
+    #[arg(long, requires = "checkpoint_url")]
+    checkpoint_client_cert: Option<PathBuf>,
+    /// Private key for that certificate (PKCS#8 PEM).
+    #[arg(long, requires = "checkpoint_url")]
+    checkpoint_client_key: Option<PathBuf>,
+    /// CA that issued the collector's certificate (PEM).
+    #[arg(long, requires = "checkpoint_url")]
+    checkpoint_ca: Option<PathBuf>,
+    /// Seconds between checkpoints while the log grows.
+    #[arg(long, default_value_t = 30)]
+    checkpoint_interval_secs: u64,
+    /// Seconds the log may run ahead of its newest accepted checkpoint
+    /// before allowed requests fail closed.
+    #[arg(long, default_value_t = 300)]
+    checkpoint_max_lag_secs: u64,
     /// Gateway identifier recorded in audit events.
     #[arg(long, default_value = "acf-gateway-dev")]
     gateway_id: String,
@@ -203,6 +239,7 @@ async fn run() -> Result<(), String> {
             mtls: args.tls_cert.is_some(),
             capabilities_required: args.authority_keys.is_some(),
             audit_sink: args.audit_log.is_some(),
+            audit_anchored: args.checkpoint_url.is_some(),
         };
         let refusals = production_refusals(&facts, &loaded.config);
         if !refusals.is_empty() {
@@ -242,7 +279,7 @@ async fn run() -> Result<(), String> {
         deployment_profile: profile_name.to_owned(),
         config_digest: loaded.digest.as_ref().map(|d| d.as_str().to_owned()),
     };
-    let audit = audit_settings(args.audit_log.as_ref(), gateway_info)?;
+    let (audit, audit_summary) = audit_settings(&args, gateway_info)?;
     let store = SqliteStateStore::open(&args.state_db)
         .map_err(|_| format!("cannot open state database {}", args.state_db.display()))?;
     let mut state = StateSettings::new(
@@ -269,7 +306,7 @@ async fn run() -> Result<(), String> {
             gateway.require_capabilities(CapabilityVerifier::new(keys).map_err(|e| e.to_string())?);
     }
     let summary = format!(
-        "{BUILD_FLAVOR} build, {profile_name} profile, config {}",
+        "{BUILD_FLAVOR} build, {profile_name} profile, config {}, {audit_summary}",
         loaded
             .digest
             .as_ref()
@@ -472,25 +509,67 @@ mod development {
     }
 }
 
-/// Fail-closed JSON-lines audit to a file, or to stderr.
-fn audit_settings(path: Option<&PathBuf>, gateway: GatewayInfo) -> Result<AuditSettings, String> {
-    let writer: Box<dyn std::io::Write + Send> = match path {
-        Some(path) => Box::new(
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .map_err(|e| format!("cannot open audit log {}: {e}", path.display()))?,
-        ),
-        None => Box::new(std::io::stderr()),
+/// Hash-chained, fail-closed JSON-lines audit to a file (continuing its
+/// log) or to stderr, and, with `--checkpoint-url`, signed checkpoints to an
+/// external collector. Returns the settings and a one-line description.
+fn audit_settings(args: &Args, gateway: GatewayInfo) -> Result<(AuditSettings, String), String> {
+    let sink = match &args.audit_log {
+        Some(path) => ChainedJsonSink::open(path).map_err(|e| e.to_string())?,
+        None => ChainedJsonSink::new(Box::new(std::io::stderr())).map_err(|e| e.to_string())?,
     };
-    Ok(AuditSettings {
-        sink: Arc::new(JsonLinesSink::new(writer)),
-        hasher: AuditHasher::random().map_err(|e| e.to_string())?,
-        // An allowed request runs only after its decision is recorded.
-        required: true,
-        gateway,
-    })
+    let mut summary = format!("audit {}", sink.log());
+    let sink = if let Some(url) = &args.checkpoint_url {
+        summary.push_str(" anchored by checkpoints");
+        anchored(args, sink, url, &gateway.id)?
+    } else {
+        summary.push_str(" with local hash chain only");
+        Arc::new(sink)
+    };
+    Ok((
+        AuditSettings {
+            sink,
+            hasher: AuditHasher::random().map_err(|e| e.to_string())?,
+            // An allowed request runs only after its decision is recorded.
+            required: true,
+            gateway,
+        },
+        summary,
+    ))
+}
+
+/// Gates `sink` on checkpoint freshness and starts publishing checkpoints
+/// of its head to `url`.
+fn anchored(
+    args: &Args,
+    sink: ChainedJsonSink,
+    url: &str,
+    gateway_id: &str,
+) -> Result<Arc<ChainedJsonSink>, String> {
+    let anchor = Arc::new(AnchorState::new(Duration::from_secs(
+        args.checkpoint_max_lag_secs,
+    )));
+    let sink = Arc::new(sink.with_anchor(anchor.clone()));
+    let path = |p: &Option<PathBuf>| p.as_deref().unwrap_or(Path::new("")).to_owned();
+    let tls = client_config(
+        &read_bytes(&path(&args.checkpoint_client_cert))?,
+        &read_bytes(&path(&args.checkpoint_client_key))?,
+        &read_bytes(&path(&args.checkpoint_ca))?,
+    )
+    .map_err(|e| format!("checkpoint client: {e}"))?;
+    let publisher = Arc::new(HttpCheckpointPublisher::new(url, tls)?);
+    let key = read_key_pair(&path(&args.audit_key)).map_err(|e| e.to_string())?;
+    let kid = KeyId::new(args.audit_kid.clone().unwrap_or_default())
+        .map_err(|e| format!("--audit-kid: {e}"))?;
+    let signer = CheckpointSigner::new(kid, gateway_id.to_owned(), key);
+    tokio::spawn(run_checkpoints(
+        sink.clone(),
+        signer,
+        publisher,
+        anchor,
+        Duration::from_secs(args.checkpoint_interval_secs.max(1)),
+        report,
+    ));
+    Ok(sink)
 }
 
 #[expect(
