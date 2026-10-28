@@ -1,0 +1,5 @@
+# Replace `entitlements: []` in control-plane/config/authority.yaml with this.
+entitlements:
+  - principal: "workload:agent-1"
+    grants:
+      - { action: cloudflare.dns.records.list, resource: "cloudflare-zone:example.com" }

@@ -1,0 +1,9 @@
+# An administrator-approved job (acf.job/v1). Copy to
+# control-plane/config/jobs/; `acf-setup admit` signs it.
+schema: acf.job/v1
+id: dns-read
+principals: ["workload:agent-1"]
+ttl_secs: 900
+limits: { maxRequests: 50 }
+grants:
+  - { action: cloudflare.dns.records.list, resource: "cloudflare-zone:example.com" }

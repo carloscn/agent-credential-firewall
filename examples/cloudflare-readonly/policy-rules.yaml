@@ -1,0 +1,7 @@
+# Replace `rules: []` in gateway/config/policy.yaml with this.
+rules:
+  - id: agent-1-dns-read
+    effect: allow
+    principals: ['workload:agent-1']
+    actions: [cloudflare.dns.records.list]
+    resources: ['cloudflare-zone:example.com']

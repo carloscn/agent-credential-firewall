@@ -1,0 +1,17 @@
+# Replace `resources: {}` and `secrets: {}` in gateway/config/bundle.yaml
+# with this. Set your zone's name and ID (Cloudflare dashboard → Overview).
+resources:
+  "cloudflare-zone:example.com":
+    connector: cloudflare
+    environment: production
+    bindings:
+      zone_id: 023e105f4ecef8ad9ca31a8372d0c353
+    credentials:
+      read: secret://production/cloudflare/example.com/dns-read
+secrets:
+  "secret://production/cloudflare/example.com/dns-read":
+    use_binding:
+      connectors: [cloudflare]
+      origins: ["https://api.cloudflare.com"]
+      auth_slot: read
+      environment: production

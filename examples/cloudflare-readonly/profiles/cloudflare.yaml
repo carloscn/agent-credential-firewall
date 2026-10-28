@@ -1,0 +1,21 @@
+# Cloudflare DNS, read-only (acf.profile/v1). Role: profile-author.
+# Copy to gateway/config/profiles/ in the acf-setup output.
+schema: acf.profile/v1
+connector: cloudflare
+revision: 1
+base_url: https://api.cloudflare.com/client/v4
+authentication:
+  strategy: bearer
+actions:
+  cloudflare.dns.records.list:
+    method: GET
+    path: /zones/{resource.zone_id}/dns_records
+    credential_slot: read
+    classification: read
+    params:
+      name: { location: query, type: dns_name }
+      type: { location: query, type: string, enum: [A, AAAA, CNAME, TXT, MX] }
+    response:
+      fields: [success, errors, result.id, result.type, result.name, result.content, result.ttl, result.proxied]
+    audit:
+      record: [name, type]
