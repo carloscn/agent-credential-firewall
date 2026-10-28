@@ -82,6 +82,6 @@ Each check, with its expected result:
    ```
 
    It exits 0 and reports at least one checkpoint.
-4. **Revocation works.** Remove `agent-1`'s entry from `/etc/acf/gateway/config/devices.yaml`. Within 5 seconds the next request is denied `unauthenticated`. Restore the entry afterwards.
+4. **Revocation works.** Replace `/etc/acf/gateway/config/devices.yaml` with a valid empty registry, `schema: acf.devices/v1` and `devices: []`, keeping a copy of the original. Within 5 seconds the next request is denied `unauthenticated`. Then restore the original. Commenting out the only entry leaves an invalid file, which the gateway ignores while it keeps the old registry.
 
 Record each step's output, without the token. Failures go to the issue tracker with the `staging` label.

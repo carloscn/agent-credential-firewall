@@ -28,7 +28,7 @@ Milestone 1 is in progress:
 
 - WP-07 (done, integrity only): the per-record encrypted local provider ([encrypted-local.md](docs/providers/encrypted-local.md)), administered with `acf-store`. Keys come from systemd credentials or a protected mounted file. No rollback anchor is implemented, so production requires the explicit `rollback_resistance: none` acknowledgement and refuses a configured anchor.
 
-**Deploying:** `acf-setup init` generates a complete production deployment in one command; see [docs/deployment.md](docs/deployment.md). Agents such as Claude Code use ACF through the read-only MCP adapter, `acf-agent mcp`; see [docs/mcp.md](docs/mcp.md).
+**Deploying:** `acf-setup init` generates a complete production deployment in one command; see [docs/deployment.md](docs/deployment.md). For an operations agent, see the [runbook](docs/operations/devops-runbook.md) and its [prompt](docs/operations/devops-agent-prompt.md). Agents such as Claude Code use ACF through the read-only MCP adapter, `acf-agent mcp`; see [docs/mcp.md](docs/mcp.md).
 
 **Security review:** the v1.0 review is in [docs/security/v1-review.md](docs/security/v1-review.md). It found no high-severity issues; it lists what was fixed, what is accepted, and the follow-ups.
 

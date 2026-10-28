@@ -2,6 +2,8 @@
 
 ACF v1.0 is read-only: agents can run semantic read actions, and every mutation is refused. See the [v1.0 plan](implementation-plan.md#23-v10--read-only-release) for scope and limitations.
 
+Handing the deployment to an operations agent? Give it [operations/devops-agent-prompt.md](operations/devops-agent-prompt.md). That prompt drives the step-by-step [runbook](operations/devops-runbook.md).
+
 ## One command
 
 ```bash
