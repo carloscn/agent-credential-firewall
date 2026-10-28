@@ -30,6 +30,8 @@ Milestone 1 is in progress:
 
 **Deploying:** `acf-setup init` generates a complete production deployment in one command; see [docs/deployment.md](docs/deployment.md). Agents such as Claude Code use ACF through the read-only MCP adapter, `acf-agent mcp`; see [docs/mcp.md](docs/mcp.md).
 
+**Security review:** the v1.0 review is in [docs/security/v1-review.md](docs/security/v1-review.md). It found no high-severity issues; it lists what was fixed, what is accepted, and the follow-ups.
+
 **Next: v1.0, a read-only release.** It makes the M1 core installable with one command and usable by agents through MCP, after a bounded security review. Mutations stay refused until M2. See [the plan](docs/implementation-plan.md#23-v10--read-only-release).
 
 Release builds (no `development` feature) run with mTLS only, and a release build starts under `production` with an admitted configuration and an encrypted local store.

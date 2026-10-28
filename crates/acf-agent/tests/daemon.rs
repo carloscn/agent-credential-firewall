@@ -227,3 +227,24 @@ async fn an_unreachable_gateway_is_reported_without_detail() {
         Err(AgentError::Daemon(LocalErrorCode::GatewayUnavailable))
     ));
 }
+
+#[tokio::test]
+async fn a_client_that_never_sends_headers_is_disconnected() {
+    let dir = TempDir::new();
+    let socket = start(&dir, None);
+    let mut idle = UnixStream::connect(&socket).await.unwrap();
+    let started = std::time::Instant::now();
+    let mut buffer = [0u8; 64];
+    let read = tokio::time::timeout(
+        acf_identity::HEADER_READ_TIMEOUT + std::time::Duration::from_secs(5),
+        idle.read(&mut buffer),
+    )
+    .await
+    .expect("the daemon must close an idle connection");
+    assert_eq!(read.unwrap(), 0, "closed without a response");
+    assert!(
+        started.elapsed() + std::time::Duration::from_secs(1) >= acf_identity::HEADER_READ_TIMEOUT
+    );
+    // The daemon still serves others.
+    assert!(local::create_task(&socket, "after", None).await.is_ok());
+}

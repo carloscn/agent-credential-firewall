@@ -232,6 +232,11 @@ fn offline_keys_stay_off_the_servers_and_private_keys_are_private() {
             }
         }
     }
+    let unit = std::fs::read_to_string(root.path("out/gateway/acf-gateway.service")).unwrap();
+    assert!(
+        unit.contains("--rate-limit-principal 600"),
+        "fresh capabilities must not lift an agent's total request rate"
+    );
     let (ok, output) = Root::setup(&["init", "--out", root.path("out").to_str().unwrap()]);
     assert!(!ok && output.contains("already exists"), "{output}");
 }

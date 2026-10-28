@@ -29,7 +29,7 @@ use acf_config::{
 use acf_control_plane::{
     Authority, AuthorityConfig, AuthorityPolicy, CapabilitySigner, CheckpointStore,
     checkpoint_router, generate_pem, public_key, read_jobs, read_key_pair, read_stored, router,
-    sign_detached,
+    sign_detached, statement_of,
 };
 use acf_identity::{
     AUTHORITY_KEYS_SCHEMA, DeviceRegistry, MtlsIdentityProvider, serve_tls, server_config,
@@ -311,6 +311,19 @@ fn verify_audit(log: &Path, store: &Path, keys: &Path) -> Result<String, String>
             "no checkpoints: nothing protects this log against truncation or replacement\n",
         ),
     }
+    // A gateway starts a new log when its file is replaced or rotated. A
+    // deleted log file leaves only its checkpoints behind, so list them.
+    if let Some(gateway) = statements.first().map(|s| s.gateway.clone()) {
+        let others = other_logs(store, &verified.log, &gateway);
+        if !others.is_empty() {
+            let _ = writeln!(
+                report,
+                "gateway {gateway} has checkpoints for {} other logs; verify each, and treat a missing file as a deleted log: {}",
+                others.len(),
+                others.join(", ")
+            );
+        }
+    }
     if findings.is_empty() {
         Ok(report)
     } else {
@@ -319,6 +332,34 @@ fn verify_audit(log: &Path, store: &Path, keys: &Path) -> Result<String, String>
         }
         Err(report)
     }
+}
+
+/// Logs in `store`, other than `log`, whose newest checkpoint is from
+/// `gateway`.
+fn other_logs(store: &Path, log: &str, gateway: &str) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(store) else {
+        return Vec::new();
+    };
+    let mut logs: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .strip_suffix(".jsonl")
+                .map(str::to_owned)
+        })
+        .filter(|name| name != log)
+        .filter(|name| {
+            read_stored(store, name)
+                .ok()
+                .and_then(|stored| stored.last().cloned())
+                .and_then(|last| statement_of(&last).ok())
+                .is_some_and(|statement| statement.gateway == gateway)
+        })
+        .collect();
+    logs.sort();
+    logs
 }
 
 fn write_new(path: &Path, contents: &str, mode: u32) -> Result<(), String> {

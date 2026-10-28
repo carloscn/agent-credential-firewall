@@ -39,6 +39,9 @@ pub const DEFAULT_SOCKET_MODE: u32 = 0o660;
 /// Largest local request body.
 pub const MAX_LOCAL_BODY_BYTES: usize = 64 * 1024;
 
+/// Most local connections served at once.
+pub const MAX_LOCAL_CONNECTIONS: usize = 256;
+
 /// Why the daemon could not start.
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonError {
@@ -241,9 +244,15 @@ pub fn router(gateway: GatewayClient, authority: Option<AuthorityClient>) -> Rou
 }
 
 /// Serves `router` on `socket`. Connections from UIDs outside `allowed` are
-/// closed before any HTTP is read.
+/// closed before any HTTP is read; at most [`MAX_LOCAL_CONNECTIONS`] are
+/// served at once, and a client that stops sending headers is disconnected
+/// after [`acf_identity::HEADER_READ_TIMEOUT`].
 pub async fn serve(socket: BoundSocket, allowed: BTreeSet<u32>, router: Router) {
+    let slots = Arc::new(tokio::sync::Semaphore::new(MAX_LOCAL_CONNECTIONS));
     loop {
+        let Ok(slot) = Arc::clone(&slots).acquire_owned().await else {
+            return;
+        };
         let Ok((stream, _)) = socket.listener.accept().await else {
             tokio::time::sleep(Duration::from_millis(50)).await;
             continue;
@@ -261,9 +270,10 @@ pub async fn serve(socket: BoundSocket, allowed: BTreeSet<u32>, router: Router) 
         };
         let service = TowerToHyperService::new(router.clone().layer(Extension(peer)));
         tokio::spawn(async move {
-            let _ = hyper::server::conn::http1::Builder::new()
+            let _ = acf_identity::http1()
                 .serve_connection(TokioIo::new(stream), service)
                 .await;
+            drop(slot);
         });
     }
 }
