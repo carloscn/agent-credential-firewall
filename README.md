@@ -32,6 +32,8 @@ Milestone 1 is in progress:
 
 **Security review:** the v1.0 review is in [docs/security/v1-review.md](docs/security/v1-review.md). It found no high-severity issues; it lists what was fixed, what is accepted, and the follow-ups.
 
+**Releases:** tagging `v*` publishes Linux x86-64 archives with SHA-256 checksums; see the [v1.0.0 release notes](docs/releases/v1.0.0.md) and the [staging run](docs/staging.md).
+
 **Next: v1.0, a read-only release.** It makes the M1 core installable with one command and usable by agents through MCP, after a bounded security review. Mutations stay refused until M2. See [the plan](docs/implementation-plan.md#23-v10--read-only-release).
 
 Release builds (no `development` feature) run with mTLS only, and a release build starts under `production` with an admitted configuration and an encrypted local store.

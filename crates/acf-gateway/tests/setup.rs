@@ -95,13 +95,21 @@ impl Root {
     /// Copies each role directory to its install location and creates the
     /// state directories and the secret store, as DEPLOY.md describes.
     fn install(&self) {
-        for (from, to) in [
-            ("out/gateway", "etc/gateway"),
-            ("out/control-plane", "etc/control-plane"),
-            ("out/agent-laptop-1", "etc/agent"),
-        ] {
-            copy_dir(&self.path(from), &self.path(to));
-        }
+        let agent = std::fs::read_dir(self.path("out"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("agent-"))
+            })
+            .unwrap();
+        copy_dir(&self.path("out/gateway"), &self.path("etc/gateway"));
+        copy_dir(
+            &self.path("out/control-plane"),
+            &self.path("etc/control-plane"),
+        );
+        copy_dir(&agent, &self.path("etc/agent"));
         for dir in ["state/gateway", "state/control-plane"] {
             std::fs::create_dir_all(self.path(dir)).unwrap();
         }
@@ -335,4 +343,105 @@ fn a_generated_deployment_starts_from_its_units() {
     let stderr = String::from_utf8_lossy(&task.stderr);
     assert!(stderr.contains("task_denied"), "{stderr}");
     std::thread::sleep(Duration::from_millis(100));
+}
+
+/// Splices `examples/cloudflare-readonly` into a generated deployment the
+/// way `docs/staging.md` describes.
+fn apply_cloudflare_example(out: &Path) {
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/cloudflare-readonly");
+    let read = |name: &str| std::fs::read_to_string(example.join(name)).unwrap();
+    let splice = |file: &Path, from: &str, to: &str| {
+        let text = std::fs::read_to_string(file).unwrap();
+        assert!(text.contains(from), "{} lacks `{from}`", file.display());
+        std::fs::write(file, text.replacen(from, to, 1)).unwrap();
+    };
+    splice(
+        &out.join("gateway/config/bundle.yaml"),
+        "resources: {}\nsecrets: {}\n",
+        &read("bundle-resources.yaml"),
+    );
+    splice(
+        &out.join("gateway/config/policy.yaml"),
+        "rules: []\n",
+        &read("policy-rules.yaml"),
+    );
+    splice(
+        &out.join("control-plane/config/authority.yaml"),
+        "entitlements: []\n",
+        &read("entitlements.yaml"),
+    );
+    std::fs::copy(
+        example.join("profiles/cloudflare.yaml"),
+        out.join("gateway/config/profiles/cloudflare.yaml"),
+    )
+    .unwrap();
+    std::fs::copy(
+        example.join("jobs/dns-read.yaml"),
+        out.join("control-plane/config/jobs/dns-read.yaml"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn the_cloudflare_staging_example_admits_and_grants_a_task() {
+    let root = Root::new();
+    let p = |r: &str| root.path(r).to_str().unwrap().to_owned();
+    let bin = Root::bin_dir();
+    let (ok, output) = Root::setup(&[
+        "init",
+        "--out",
+        &p("out"),
+        "--etc",
+        &p("etc"),
+        "--state",
+        &p("state"),
+        "--run",
+        root.run.to_str().unwrap(),
+        "--bin",
+        bin.to_str().unwrap(),
+        "--gateway-listen",
+        "127.0.0.1:0",
+        "--control-plane-listen",
+        &format!("127.0.0.1:{}", free_port()),
+    ]);
+    assert!(ok, "{output}");
+    apply_cloudflare_example(&root.path("out"));
+    let (ok, output) = Root::setup(&["admit", "--out", &p("out")]);
+    assert!(ok, "{output}");
+    assert!(
+        output.contains("admitted 1 profiles") && output.contains("1 jobs"),
+        "{output}"
+    );
+    if cfg!(feature = "development") {
+        return;
+    }
+
+    root.install();
+    let mut running = Running(Vec::new());
+    for unit in [
+        "etc/control-plane/acf-control-plane.service",
+        "etc/gateway/acf-gateway.service",
+        "etc/agent/acf-agent.service",
+    ] {
+        let child = root
+            .start(unit)
+            .unwrap_or_else(|output| panic!("{unit} did not start:\n{output}"));
+        running.0.push(child);
+    }
+    let task = Command::new(bin.join("acf-agent"))
+        .args(["task", "create", "--socket"])
+        .arg(root.run.join("acf.sock"))
+        .args(["--task", "staging", "--job", "dns-read"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&task.stdout);
+    assert!(
+        task.status.success(),
+        "{}",
+        String::from_utf8_lossy(&task.stderr)
+    );
+    assert!(
+        stdout.contains("cloudflare.dns.records.list") && stdout.contains("\"maxRequests\": 50"),
+        "{stdout}"
+    );
 }
