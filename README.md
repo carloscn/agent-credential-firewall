@@ -79,3 +79,7 @@ Every crate in this workspace handles secrets, identity, authorization, or audit
 | `acf-e2e` | Test-only: daemon, authority, and gateway end to end | WP-09 |
 
 `deny.toml` enforces part of the dependency direction. Only `acf-gateway` may depend on `acf-provider-local`, and OpenSSL-based TLS crates are banned.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
