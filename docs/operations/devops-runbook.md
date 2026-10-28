@@ -1,6 +1,6 @@
 # ACF deployment runbook (for a DevOps agent)
 
-Target: **ACF v1.0.0-rc.1** on a single Linux host, using the Cloudflare DNS read-only connector. This is the WP-20 staging run. When every check in §7 passes, the project tags v1.0.0.
+Target: **ACF v1.0.0-rc.2** on a single Linux host, using the Cloudflare DNS read-only connector. This is the WP-20 staging run. When every check in §7 passes, the project tags v1.0.0.
 
 Follow the steps in order. Every step lists what must be true before moving on. If a check fails, **stop and report**; do not work around it.
 
@@ -8,7 +8,7 @@ Follow the steps in order. Every step lists what must be true before moving on. 
 
 | Input | Example | Notes |
 | --- | --- | --- |
-| Target host with sudo | `acf-staging-1` | Linux x86-64, systemd, glibc ≥ 2.35 (Ubuntu 22.04+, Debian 12+) |
+| Target host with sudo | `acf-staging-1` | Linux x86-64, systemd, glibc ≥ 2.31 (Ubuntu 20.04+, Debian 11+) |
 | Gateway host name | `localhost` for single host | Name the agent host uses to reach the gateway and control plane |
 | Agent account | `claude` | The account the AI agent runs as |
 | Cloudflare zone name and zone ID | `example.org`, `023e105f…` | From the Cloudflare dashboard → Overview |
@@ -28,29 +28,29 @@ Steps 1–4 run on an **admin workstation**. Steps 5–7 run on the **target hos
 
 ```bash
 uname -m                      # x86_64
-ldd --version | head -1       # glibc 2.35 or newer
+ldd --version | head -1       # glibc 2.31 or newer
 systemctl --version | head -1
 timedatectl show -p NTPSynchronized --value   # yes: capabilities and checkpoints are time-bound
 ss -ltn '( sport = :8443 or sport = :8444 )'  # nothing listening
 id <agent-account>
 ```
 
-**Pass:** x86_64, glibc ≥ 2.35, systemd present, clock synchronized, ports 8443 and 8444 free, agent account exists. Record the agent account's UID; you need it in §3.
+**Pass:** x86_64, glibc ≥ 2.31, systemd present, clock synchronized, ports 8443 and 8444 free, agent account exists. Record the agent account's UID; you need it in §3.
 
 ## 2. Download and verify the release (admin workstation and target host)
 
 ```bash
-base=https://github.com/carloscn/agent-credential-firewall/releases/download/v1.0.0-rc.1
-curl -fLO "$base/acf-1.0.0-rc.1-x86_64-unknown-linux-gnu.tar.gz"
-curl -fLO "$base/acf-1.0.0-rc.1-x86_64-unknown-linux-gnu.tar.gz.sha256"
-sha256sum -c acf-1.0.0-rc.1-x86_64-unknown-linux-gnu.tar.gz.sha256
-tar -xzf acf-1.0.0-rc.1-x86_64-unknown-linux-gnu.tar.gz
-cd acf-1.0.0-rc.1-x86_64-unknown-linux-gnu
+base=https://github.com/carloscn/agent-credential-firewall/releases/download/v1.0.0-rc.2
+curl -fLO "$base/acf-1.0.0-rc.2-x86_64-unknown-linux-gnu.tar.gz"
+curl -fLO "$base/acf-1.0.0-rc.2-x86_64-unknown-linux-gnu.tar.gz.sha256"
+sha256sum -c acf-1.0.0-rc.2-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf acf-1.0.0-rc.2-x86_64-unknown-linux-gnu.tar.gz
+cd acf-1.0.0-rc.2-x86_64-unknown-linux-gnu
 sudo install -m 0755 bin/* /usr/local/bin/      # on the target host
 for b in acf-gateway acf-control-plane acf-agent acf-setup acf-store; do $b --version; done
 ```
 
-**Pass:** the checksum line ends in `OK`, and all five tools print `1.0.0-rc.1`.
+**Pass:** the checksum line ends in `OK`, and all five tools print `1.0.0-rc.2`.
 
 The archive contains `docs/deployment.md`, `docs/staging.md`, `docs/mcp.md`, `docs/security-review.md`, `RELEASE-NOTES.md`, and `examples/cloudflare-readonly/`. This runbook follows `docs/staging.md`; read it once.
 
@@ -192,7 +192,7 @@ Run as the agent account unless noted. All of these must pass.
 Post a comment on the roadmap issue, [#23](https://github.com/carloscn/agent-credential-firewall/issues/23), or the issue the operator names, using this template. **Never include the token or any key.**
 
 ```markdown
-## ACF v1.0.0-rc.1 staging run
+## ACF v1.0.0-rc.2 staging run
 - Host / OS / glibc:
 - Preflight (§1): pass/fail
 - Release checksum (§2): pass/fail

@@ -32,6 +32,18 @@ for binary in acf-gateway acf-store acf-setup acf-control-plane acf-agent; do
     }
 done
 
+# The supported floor is Ubuntu 20.04 (glibc 2.31). A binary built on a newer
+# distribution can need newer glibc symbols and fail to start there.
+max_glibc=2.31
+for binary in acf-gateway acf-store acf-setup acf-control-plane acf-agent; do
+    needed=$(objdump -T "$stage/bin/$binary" | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' \
+        | sed 's/^GLIBC_//' | sort -Vu | tail -1)
+    if [ "$(printf '%s\n%s\n' "$needed" "$max_glibc" | sort -V | tail -1)" != "$max_glibc" ]; then
+        echo "$binary needs glibc $needed; the floor is $max_glibc (build on Ubuntu 20.04)" >&2
+        exit 1
+    fi
+done
+
 cp README.md "$stage/"
 cp "docs/releases/v$version.md" "$stage/RELEASE-NOTES.md" 2>/dev/null \
     || cp docs/releases/v1.0.0.md "$stage/RELEASE-NOTES.md"

@@ -4,7 +4,7 @@ Copy everything below the line into the DevOps agent's session. Replace the `<â€
 
 ---
 
-You are deploying **ACF (Agent Credential Firewall) v1.0.0-rc.1** for its staging run.
+You are deploying **ACF (Agent Credential Firewall) v1.0.0-rc.2** for its staging run.
 
 Repository: https://github.com/carloscn/agent-credential-firewall
 
