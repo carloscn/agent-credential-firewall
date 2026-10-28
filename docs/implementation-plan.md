@@ -549,7 +549,7 @@ Deliverables:
 - A staging deployment from `acf-setup` serving one real read-only API end to end. The run checks the audit log against its checkpoints.
 - Release notes listing the v1.0 limitations above.
 
-Status: packaging done. `.github/workflows/release.yml` builds, smoke-tests, packages, and on a `v*` tag publishes checksummed Linux x86-64 archives (`scripts/package-release.sh`). The release notes are in [releases/v1.0.0.md](releases/v1.0.0.md). The staging run follows [staging.md](staging.md) with `examples/cloudflare-readonly` and needs an operator-provided host and Cloudflare token. `v1.0.0` is tagged after that run; `v1.0.0-rc.1` may be tagged before it.
+Status: packaging done. `.github/workflows/release.yml` builds, smoke-tests, packages, and on a `v*` tag publishes checksummed Linux x86-64 archives (`scripts/package-release.sh`). The release notes are in [releases/v1.0.0.md](releases/v1.0.0.md). The staging run follows [staging.md](staging.md) with `examples/cloudflare-readonly` and needs an operator-provided host and Cloudflare token. `v1.0.0` is tagged after that run; Release candidates may be tagged before it: `v1.0.0-rc.1` needed glibc 2.35; from `v1.0.0-rc.2` the binaries are built in an Ubuntu 20.04 container and packaging refuses any binary that needs glibc newer than 2.31.
 
 ### M2 — approved mutation path
 

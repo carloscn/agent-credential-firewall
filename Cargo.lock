@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "acf-agent"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "acf-identity",
  "acf-protocol",
@@ -26,7 +26,7 @@ dependencies = [
 
 [[package]]
 name = "acf-audit"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "acf-protocol",
  "async-trait",
@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "acf-config"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "acf-protocol",
  "acf-secrets",
@@ -53,7 +53,7 @@ dependencies = [
 
 [[package]]
 name = "acf-connectors"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "acf-config",
  "acf-protocol",
@@ -69,7 +69,7 @@ dependencies = [
 
 [[package]]
 name = "acf-control-plane"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "acf-audit",
  "acf-config",
@@ -89,7 +89,7 @@ dependencies = [
 
 [[package]]
 name = "acf-e2e"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "acf-agent",
  "acf-audit",
@@ -113,7 +113,7 @@ dependencies = [
 
 [[package]]
 name = "acf-gateway"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "acf-agent",
  "acf-audit",
@@ -142,7 +142,7 @@ dependencies = [
 
 [[package]]
 name = "acf-identity"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "acf-protocol",
  "async-trait",
@@ -160,7 +160,7 @@ dependencies = [
 
 [[package]]
 name = "acf-policy"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "acf-config",
  "acf-identity",
@@ -172,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "acf-protocol"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "base64",
  "serde",
@@ -183,7 +183,7 @@ dependencies = [
 
 [[package]]
 name = "acf-provider-local"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "acf-secrets",
  "async-trait",
@@ -197,7 +197,7 @@ dependencies = [
 
 [[package]]
 name = "acf-secrets"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "async-trait",
  "secrecy",
@@ -209,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "acf-state"
-version = "1.0.0-rc.1"
+version = "1.0.0-rc.2"
 dependencies = [
  "acf-protocol",
  "async-trait",
