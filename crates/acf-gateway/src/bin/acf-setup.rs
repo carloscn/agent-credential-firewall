@@ -100,6 +100,10 @@ struct InitArgs {
     /// Control-plane listen address.
     #[arg(long, default_value = "0.0.0.0:8444")]
     control_plane_listen: String,
+    /// Requests each principal may make per minute. Bounds an agent that
+    /// keeps requesting fresh capabilities to reset their limits.
+    #[arg(long, default_value_t = 600)]
+    rate_limit_principal: u32,
     /// Validity of server and client certificates, in days.
     #[arg(long, default_value_t = 90)]
     cert_days: i64,
@@ -333,7 +337,8 @@ ExecStart={bin}/acf-gateway --config {config} --profiles {profiles} --policy {po
 --authority-keys {authority_keys} --audience {gw} --gateway-id {gw} \
 --audit-log {audit} --audit-key {audit_key} --audit-kid {gw}-audit \
 --checkpoint-url https://{cp}:{cp_port}/v1/audit/checkpoints --checkpoint-client-cert {client_cert} \
---checkpoint-client-key {client_key} --checkpoint-ca {ca} --state-db {state_db}\n\
+--checkpoint-client-key {client_key} --checkpoint-ca {ca} --state-db {state_db} \
+--rate-limit-principal {rate}\n\
 ReadWritePaths={state_dir}\nRestart=on-failure\n{HARDENING}\n[Install]\nWantedBy=multi-user.target\n",
         bin = args.bin.display(),
         config = e("config/bundle.yaml"),
@@ -353,6 +358,7 @@ ReadWritePaths={state_dir}\nRestart=on-failure\n{HARDENING}\n[Install]\nWantedBy
         client_cert = e("tls/checkpoint-client.pem"),
         client_key = e("tls/checkpoint-client.key"),
         state_db = s("state.sqlite"),
+        rate = args.rate_limit_principal,
         state_dir = args.state.join("gateway").display(),
     )
 }

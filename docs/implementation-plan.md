@@ -537,6 +537,8 @@ Deliverables:
 - A written review of the v1.0 trust boundaries: agent ↔ daemon, daemon ↔ authority, daemon ↔ gateway, administrator ↔ configuration, gateway ↔ store, and gateway ↔ collector.
 - Fixes for every high-severity finding. Remaining findings are recorded with their severity and owner.
 
+Status: done. See [the v1.0 security review](security/v1-review.md). No high-severity findings; V1-01, V1-02, and V1-05 were fixed, V1-03 was mitigated, and the rest are accepted with follow-ups.
+
 #### WP-20 — Release packaging and staging validation
 
 Dependencies: WP-17, WP-18, WP-19

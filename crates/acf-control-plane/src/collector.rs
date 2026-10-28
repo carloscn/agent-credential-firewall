@@ -41,8 +41,9 @@ pub enum CollectorError {
     /// Bad signature, unknown key, or malformed.
     #[error("{0}")]
     Invalid(CheckpointError),
-    /// The caller is not the principal this key belongs to.
-    #[error("caller may not submit checkpoints for this key")]
+    /// The caller is not the principal this key belongs to, or the log
+    /// belongs to another gateway.
+    #[error("caller may not submit this checkpoint")]
     Forbidden,
     /// It contradicts or precedes the stored history.
     #[error("checkpoint conflicts with the stored history")]
@@ -97,12 +98,22 @@ pub fn read_stored(dir: &Path, log: &str) -> Result<Vec<CheckpointEnvelope>, Str
         .collect()
 }
 
+/// The newest stored checkpoint of one log.
+#[derive(Clone, Debug)]
+struct Newest {
+    seq: u64,
+    head: String,
+    /// The gateway whose key signed the log's first checkpoint. Only it may
+    /// extend the log.
+    gateway: String,
+}
+
 /// The collector's store.
 pub struct CheckpointStore {
     dir: PathBuf,
     keys: AuditKeys,
-    /// Newest stored `(seq, head)` per log.
-    newest: Mutex<BTreeMap<String, (u64, String)>>,
+    /// Newest stored checkpoint per log, and the gateway that owns the log.
+    newest: Mutex<BTreeMap<String, Newest>>,
 }
 
 impl std::fmt::Debug for CheckpointStore {
@@ -133,7 +144,14 @@ impl CheckpointStore {
             };
             if let Some(last) = read_stored(dir, log)?.last() {
                 let statement = statement_of(last).map_err(|e| format!("{name}: {e}"))?;
-                newest.insert(log.to_owned(), (statement.seq, statement.head));
+                newest.insert(
+                    log.to_owned(),
+                    Newest {
+                        seq: statement.seq,
+                        head: statement.head,
+                        gateway: statement.gateway,
+                    },
+                );
             }
         }
         Ok(Self {
@@ -168,10 +186,14 @@ impl CheckpointStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match newest.get(&statement.log) {
-            Some((seq, head)) if statement.seq == *seq && statement.head == *head => {
+            // Another gateway cannot extend, or wedge, this log.
+            Some(stored) if stored.gateway != statement.gateway => {
+                return Err(CollectorError::Forbidden);
+            }
+            Some(stored) if statement.seq == stored.seq && statement.head == stored.head => {
                 return Ok(Accepted::Duplicate);
             }
-            Some((seq, _)) if statement.seq <= *seq => return Err(CollectorError::Conflict),
+            Some(stored) if statement.seq <= stored.seq => return Err(CollectorError::Conflict),
             _ => {}
         }
         let mut line =
@@ -186,7 +208,14 @@ impl CheckpointStore {
         file.write_all(&line)
             .and_then(|()| file.sync_data())
             .map_err(|e| CollectorError::Store(e.to_string()))?;
-        newest.insert(statement.log, (statement.seq, statement.head));
+        newest.insert(
+            statement.log,
+            Newest {
+                seq: statement.seq,
+                head: statement.head,
+                gateway: statement.gateway,
+            },
+        );
         Ok(Accepted::Created)
     }
 }
@@ -294,6 +323,7 @@ mod tests {
 
     struct Fixture {
         dir: PathBuf,
+        pem: String,
         signer: CheckpointSigner,
         keys: AuditKeys,
     }
@@ -321,7 +351,12 @@ mod tests {
                 "gw-1".to_owned(),
                 parse_key_pair(&pem).unwrap(),
             );
-            Self { dir, signer, keys }
+            Self {
+                dir,
+                pem,
+                signer,
+                keys,
+            }
         }
 
         fn envelope(&self, seq: u64, hash: &str) -> CheckpointEnvelope {
@@ -379,6 +414,64 @@ mod tests {
             reopened.accept(&gateway(), &fixture.envelope(6, "sha256:ee")),
             Err(CollectorError::Conflict)
         ));
+    }
+
+    #[test]
+    fn a_log_belongs_to_the_gateway_that_first_checkpointed_it() {
+        let fixture = Fixture::new();
+        let other_pem = generate_pem().unwrap();
+        let keys = AuditKeys::new(AuditKeysDocument {
+            schema: AUDIT_KEYS_SCHEMA.to_owned(),
+            keys: vec![
+                AuditKeyEntry {
+                    kid: KeyId::new("gw-audit").unwrap(),
+                    gateway: "gw-1".to_owned(),
+                    principal: gateway(),
+                    public_key: public_key(&parse_key_pair(&fixture.pem).unwrap()),
+                },
+                AuditKeyEntry {
+                    kid: KeyId::new("gw2-audit").unwrap(),
+                    gateway: "gw-2".to_owned(),
+                    principal: PrincipalId::new("gateway:gw-2").unwrap(),
+                    public_key: public_key(&parse_key_pair(&other_pem).unwrap()),
+                },
+            ],
+        })
+        .unwrap();
+        let store = CheckpointStore::open(&fixture.dir, keys.clone()).unwrap();
+        store
+            .accept(&gateway(), &fixture.envelope(3, "sha256:aa"))
+            .unwrap();
+        let intruder = CheckpointSigner::new(
+            KeyId::new("gw2-audit").unwrap(),
+            "gw-2".to_owned(),
+            parse_key_pair(&other_pem).unwrap(),
+        );
+        let wedge = intruder.sign(
+            &ChainHead {
+                log: LOG.to_owned(),
+                seq: 1_000_000,
+                hash: "sha256:ff".to_owned(),
+            },
+            OffsetDateTime::now_utc(),
+        );
+        let gw2 = PrincipalId::new("gateway:gw-2").unwrap();
+        assert!(matches!(
+            store.accept(&gw2, &wedge),
+            Err(CollectorError::Forbidden)
+        ));
+        // Still enforced after a restart.
+        let reopened = CheckpointStore::open(&fixture.dir, keys).unwrap();
+        assert!(matches!(
+            reopened.accept(&gw2, &wedge),
+            Err(CollectorError::Forbidden)
+        ));
+        assert_eq!(
+            reopened
+                .accept(&gateway(), &fixture.envelope(4, "sha256:bb"))
+                .unwrap(),
+            Accepted::Created
+        );
     }
 
     #[test]

@@ -166,7 +166,10 @@ pub use mtls::{
 #[cfg(feature = "tls")]
 pub use mtls::{REGISTRY_POLL, watch_registry};
 #[cfg(feature = "tls")]
-pub use tls::{HANDSHAKE_TIMEOUT, TlsError, client_config, serve_tls, server_config};
+pub use tls::{
+    HANDSHAKE_TIMEOUT, HEADER_READ_TIMEOUT, MAX_CONNECTIONS, TlsError, client_config, http1,
+    serve_tls, server_config,
+};
 
 #[cfg(feature = "development")]
 mod development;

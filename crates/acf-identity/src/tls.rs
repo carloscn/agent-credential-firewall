@@ -22,6 +22,25 @@ use tokio_rustls::TlsAcceptor;
 /// Time allowed for a client to complete the TLS handshake.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Time allowed for a client to send a request's headers, including the
+/// wait for the next request on a kept-alive connection.
+pub const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Most connections [`serve_tls`] holds at once; further clients wait in
+/// the listen backlog.
+pub const MAX_CONNECTIONS: usize = 1024;
+
+/// An HTTP/1.1 connection builder with the header-read timeout armed.
+/// Without a timer, hyper never times out a client that stops sending.
+#[must_use]
+pub fn http1() -> hyper::server::conn::http1::Builder {
+    let mut builder = hyper::server::conn::http1::Builder::new();
+    builder
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(HEADER_READ_TIMEOUT);
+    builder
+}
+
 /// Why a TLS configuration was rejected.
 #[derive(Debug, thiserror::Error)]
 pub enum TlsError {
@@ -132,7 +151,9 @@ pub fn client_config(
 ///
 /// Connections that fail the handshake (no, untrusted, expired, or
 /// wrong-purpose client certificate; TLS below 1.3) are dropped before any
-/// HTTP is read.
+/// HTTP is read. At most [`MAX_CONNECTIONS`] are served at once, and a
+/// client that stops sending headers is disconnected after
+/// [`HEADER_READ_TIMEOUT`].
 ///
 /// # Errors
 ///
@@ -144,7 +165,13 @@ pub async fn serve_tls(
     router: Router,
 ) -> std::io::Result<()> {
     let acceptor = TlsAcceptor::from(config);
+    let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     loop {
+        // A slot is taken before accepting, so a flood waits in the kernel
+        // backlog instead of exhausting tasks and file descriptors.
+        let Ok(slot) = Arc::clone(&slots).acquire_owned().await else {
+            return Ok(());
+        };
         let Ok((tcp, _)) = listener.accept().await else {
             // Transient accept errors (for example, file-descriptor
             // exhaustion) must not stop the listener.
@@ -168,9 +195,10 @@ pub async fn serve_tls(
                     .map(|leaf| thumbprint(leaf.as_ref())),
             };
             let service = TowerToHyperService::new(router.layer(Extension(connection)));
-            let _ = hyper::server::conn::http1::Builder::new()
+            let _ = http1()
                 .serve_connection(TokioIo::new(stream), service)
                 .await;
+            drop(slot);
         });
     }
 }
